@@ -286,7 +286,8 @@ vi.mock('./ActionButtons', () => ({
 import { NewSession } from './index'
 
 const machine = { id: 'machine-1' } as Machine
-const api = {} as ApiClient
+// DshWebLink 挂载即拉状态，未运行时返回空，链接因此不渲染。
+const api = { getDshWebStatus: async () => ({ running: false, url: null }) } as unknown as ApiClient
 
 describe('NewSession launch preferences', () => {
     beforeEach(() => {
@@ -945,7 +946,8 @@ describe('NewSession launch preferences', () => {
                 machineId: 'machine-1',
                 results: [{ piSessionId: 'pi-native-1', hapiSessionId: 'hapi-imported-1', action: 'created', appended: 2 }]
             }),
-            reopenSession: vi.fn().mockResolvedValue({ ok: true, sessionId: 'hapi-imported-1', resumed: true })
+            reopenSession: vi.fn().mockResolvedValue({ ok: true, sessionId: 'hapi-imported-1', resumed: true }),
+            getDshWebStatus: vi.fn().mockResolvedValue({ running: false, url: null })
         } as unknown as ApiClient
 
         render(
@@ -996,7 +998,8 @@ describe('NewSession launch preferences', () => {
                 machineId: machineB.id,
                 results: [{ piSessionId: 'pi-machine-b', hapiSessionId: 'hapi-machine-b', action: 'created', appended: 1 }]
             }),
-            reopenSession: vi.fn().mockResolvedValue({ ok: true, sessionId: 'hapi-machine-b', resumed: true })
+            reopenSession: vi.fn().mockResolvedValue({ ok: true, sessionId: 'hapi-machine-b', resumed: true }),
+            getDshWebStatus: vi.fn().mockResolvedValue({ running: false, url: null })
         } as unknown as ApiClient
 
         render(
@@ -1068,7 +1071,8 @@ describe('NewSession launch preferences', () => {
                     { piSessionId: 'pi-native-1', hapiSessionId: 'hapi-1', action: 'created', appended: 1 },
                     { piSessionId: 'pi-native-2', hapiSessionId: 'hapi-2', error: { code: 'session_active', message: 'active' } }
                 ]
-            })
+            }),
+            getDshWebStatus: vi.fn().mockResolvedValue({ running: false, url: null })
         } as unknown as ApiClient
 
         render(

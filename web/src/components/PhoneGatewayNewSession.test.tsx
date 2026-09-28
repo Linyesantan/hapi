@@ -7,7 +7,10 @@ import { PhoneGatewayNewSession } from './PhoneGatewayNewSession'
 function setup() {
     const create = vi.fn()
     const success = vi.fn()
-    render(<I18nProvider><PhoneGatewayNewSession api={{ createPhoneGatewaySession: create } as unknown as ApiClient}
+    render(<I18nProvider><PhoneGatewayNewSession api={{
+        createPhoneGatewaySession: create,
+        getDshWebStatus: vi.fn().mockResolvedValue({ running: false, url: null })
+    } as unknown as ApiClient}
         onCancel={vi.fn()} onSuccess={success} /></I18nProvider>)
     return { create, success }
 }

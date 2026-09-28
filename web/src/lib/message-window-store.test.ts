@@ -1574,7 +1574,7 @@ describe('legacy synchronous cache boundary', () => {
         expect(getMessageWindowState(id).messages).toEqual([])
     })
 
-    it('does not restore or replay unconfirmed sends from the legacy cache', () => {
+    it('downgrades a persisted sending row to queued instead of replaying it', () => {
         const id = sessionId('hydrate-sending')
         sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
             messages: [makeUserMessage({
@@ -1591,8 +1591,13 @@ describe('legacy synchronous cache boundary', () => {
             epoch: null
         }))
 
-        expect(getMessageWindowState(id).messages).toEqual([])
-        expect(getQueuedReconcileCandidateLocalIds(id)).toEqual([])
+        // A row that was mid-flight when the tab died is never left as 'sending'
+        // (that would re-fire the composer) and never silently dropped. It comes
+        // back as a queued row offered to reconciliation, which is what confirms
+        // or discards it.
+        const restored = getMessageWindowState(id).messages
+        expect(restored.map((message) => message.status)).toEqual(['queued'])
+        expect(getQueuedReconcileCandidateLocalIds(id)).toEqual(['local-1'])
     })
 })
 
