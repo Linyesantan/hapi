@@ -2041,19 +2041,21 @@ function importSingleCodexSession(options: {
     try {
         // 只读镜像与可执行会话分别复用，刷新历史不能写入正在运行的 CLI 会话。
         const candidates = collectImportCandidates(options.store, options.namespace, options.getSyncEngine)
-        // 活跃守卫必须跑在只读/可执行分流之前：活跃会话不是只读镜像，
-        // 若先过滤掉，检查就永远不会触发，刷新会写进正在运行的 CLI 会话。
-        const activeCandidate = candidates.find((candidate) => (
-            candidate.active
-            && getCodexImportIds(candidate.metadata).includes(options.codexSessionId)
-            && (
-                !options.machineId
-                || typeof candidate.metadata?.machineId !== 'string'
-                || candidate.metadata.machineId === options.machineId
-            )
-        ))
-        if (activeCandidate) {
-            throw new Error('Cannot sync Codex transcript while the matching HAPI session is active')
+        // 活跃守卫只拦「写进正在跑的会话」这条路径。只读镜像写的是另一个 session，
+        // 不会碰到活跃会话，所以浏览历史时允许与可执行会话并存。
+        if (!options.readOnly) {
+            const activeCandidate = candidates.find((candidate) => (
+                candidate.active
+                && getCodexImportIds(candidate.metadata).includes(options.codexSessionId)
+                && (
+                    !options.machineId
+                    || typeof candidate.metadata?.machineId !== 'string'
+                    || candidate.metadata.machineId === options.machineId
+                )
+            ))
+            if (activeCandidate) {
+                throw new Error('Cannot sync Codex transcript while the matching HAPI session is active')
+            }
         }
         // 只读镜像与可执行会话分别复用，互不串写。
         const targetCandidates = candidates

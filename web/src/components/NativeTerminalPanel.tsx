@@ -35,7 +35,7 @@ export function NativeTerminalPanel(props: {
                 <ol className="mt-2 space-y-2" aria-label="原终端排队内容">
                     {state.queue.messages.map(message => <li key={message.id} className="whitespace-pre-wrap break-words rounded bg-[var(--app-bg)] px-2 py-1.5 text-sm">{message.text}</li>)}
                 </ol>
-            ) : !state.submissions?.length ? <p className="mt-1 text-[var(--app-hint)]">{stale ? '上次读取时没有等待消息。' : '当前没有等待消息。'}</p> : null
+            ) : !state.submissions?.length ? <p className="mt-1 text-[var(--app-hint)]">{stale ? '上次读取时没有可见排队消息。' : '当前没有可见排队消息。'}</p> : null
                 : <p className="mt-1 text-[var(--app-hint)]">{query.isLoading ? '正在读取原终端…' : state?.queue.note ?? '暂时无法核对原终端队列。'}</p>}
             {state?.queue.messages.length && state.queue.note ? <p className="mt-1 text-[var(--app-hint)]">{state.queue.note}</p> : null}
             {state?.submissions?.length ? <ol className="mt-2 space-y-2" aria-label="手机发送待确认">

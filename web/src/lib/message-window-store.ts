@@ -38,13 +38,14 @@ export type MessageWindowState = {
     tailRevision: number
 }
 
-// Keep the DOM small on phones; IndexedDB retains the complete synced history.
+// Keep the DOM small on phones; the full synced history is retained elsewhere.
 const compactTouchScreen = typeof window !== 'undefined'
     && window.matchMedia?.('(pointer: coarse) and (max-width: 920px)').matches === true
 export const VISIBLE_WINDOW_SIZE = compactTouchScreen ? 80 : 400
 export const HISTORY_WINDOW_SIZE = compactTouchScreen ? 120 : 600
 // Paging sizes stay at the desktop values on purpose: they bound the network
-// payload, not the DOM. Only the in-memory window above is compacted.
+// payload and the persisted window, not the live DOM. Only the in-memory
+// windows above are compacted on touch screens.
 export const INITIAL_PAGE_SIZE = 20
 const AGENT_RUN_WINDOW_SIZE = compactTouchScreen ? 120 : 800
 const OLDER_LOAD_WINDOW_SIZE = compactTouchScreen ? 160 : 800
@@ -67,6 +68,16 @@ type InternalState = MessageWindowState & {
     olderGeneration: number
 }
 
+type PersistedMessageWindowState = {
+    messages: DecryptedMessage[]
+    hasMore: boolean
+    oldestPositionAt: number | null
+    oldestPositionSeq: number | null
+    newestPositionAt: number | null
+    newestPositionSeq: number | null
+    epoch: number | null
+}
+
 type TailSyncController = {
     api: ApiClient
     running: Promise<void> | null
@@ -80,10 +91,18 @@ const tailSyncControllers = new Map<string, TailSyncController>()
 const appliedRewindLocalIds = new Map<string, Set<string>>()
 
 const NOTIFY_THROTTLE_MS = 150
+const PERSIST_THROTTLE_MS = 200
+const STORAGE_KEY_PREFIX = 'hapi:message-window:v2:'
 const pendingNotifySessionIds = new Set<string>()
+const pendingPersistSessionIds = new Set<string>()
 let notifyRafId: ReturnType<typeof requestAnimationFrame> | null = null
 let notifyTimerId: ReturnType<typeof setTimeout> | null = null
+let persistTimerId: ReturnType<typeof setTimeout> | null = null
 let lastNotifyAt = 0
+
+// Offline caches are per-scope. When the signed-in scope changes, every cached
+// window belongs to the previous scope and must be dropped rather than shown
+// under the new one.
 let messageWindowScope: string | null = null
 
 export function setMessageWindowScope(scope: string | null): void {
@@ -142,6 +161,18 @@ function flushNotifications(): void {
     }
 }
 
+function getStorageKey(sessionId: string): string {
+    return `${STORAGE_KEY_PREFIX}${sessionId}`
+}
+
+function isSessionStorageAvailable(): boolean {
+    try {
+        return typeof sessionStorage?.getItem === 'function'
+    } catch {
+        return false
+    }
+}
+
 function toNullableNumber(value: unknown): number | null {
     return typeof value === 'number' && Number.isFinite(value) ? value : null
 }
@@ -152,6 +183,72 @@ function readPosition(at: unknown, seq: unknown): MessagePosition | null {
     return positionAt !== null && positionSeq !== null
         ? { at: positionAt, seq: positionSeq }
         : null
+}
+
+function shouldPersistState(state: InternalState): boolean {
+    return state.messages.length > 0
+        || state.hasMore
+        || state.epoch !== null
+        || state.oldestPositionAt !== null
+        || state.newestPositionAt !== null
+}
+
+function persistState(sessionId: string, state: InternalState): void {
+    if (!isSessionStorageAvailable()) {
+        return
+    }
+    try {
+        if (!shouldPersistState(state)) {
+            sessionStorage.removeItem(getStorageKey(sessionId))
+            return
+        }
+        const persisted: PersistedMessageWindowState = {
+            messages: state.messages,
+            hasMore: state.hasMore,
+            oldestPositionAt: state.oldestPositionAt,
+            oldestPositionSeq: state.oldestPositionSeq,
+            newestPositionAt: state.newestPositionAt,
+            newestPositionSeq: state.newestPositionSeq,
+            epoch: state.epoch
+        }
+        sessionStorage.setItem(getStorageKey(sessionId), JSON.stringify(persisted))
+    } catch {
+    }
+}
+
+function clearPersistedState(sessionId: string): void {
+    pendingPersistSessionIds.delete(sessionId)
+    if (!isSessionStorageAvailable()) {
+        return
+    }
+    try {
+        sessionStorage.removeItem(getStorageKey(sessionId))
+    } catch {
+    }
+}
+
+function flushPersistedStates(): void {
+    persistTimerId = null
+    const sessionIds = [...pendingPersistSessionIds]
+    pendingPersistSessionIds.clear()
+    for (const sessionId of sessionIds) {
+        const state = states.get(sessionId)
+        if (state) {
+            persistState(sessionId, state)
+        } else {
+            clearPersistedState(sessionId)
+        }
+    }
+}
+
+function schedulePersist(sessionId: string): void {
+    if (!isSessionStorageAvailable()) {
+        return
+    }
+    pendingPersistSessionIds.add(sessionId)
+    if (persistTimerId === null) {
+        persistTimerId = setTimeout(flushPersistedStates, PERSIST_THROTTLE_MS)
+    }
 }
 
 function createState(sessionId: string): InternalState {
@@ -180,12 +277,56 @@ function createState(sessionId: string): InternalState {
     }
 }
 
+function hydrateState(sessionId: string): InternalState | null {
+    if (!isSessionStorageAvailable()) {
+        return null
+    }
+    try {
+        const raw = sessionStorage.getItem(getStorageKey(sessionId))
+        if (!raw) {
+            return null
+        }
+        const parsed = JSON.parse(raw) as Partial<PersistedMessageWindowState> | null
+        if (!parsed || !Array.isArray(parsed.messages)) {
+            clearPersistedState(sessionId)
+            return null
+        }
+        const restoreMessage = (message: DecryptedMessage): DecryptedMessage => {
+            if (message.status !== 'sending') {
+                return message
+            }
+            return {
+                ...message,
+                status: message.invokedAt === null ? 'queued' : 'sent'
+            }
+        }
+        const oldest = readPosition(parsed.oldestPositionAt, parsed.oldestPositionSeq)
+        const newest = readPosition(parsed.newestPositionAt, parsed.newestPositionSeq)
+        const epoch = typeof parsed.epoch === 'number' && Number.isInteger(parsed.epoch) && parsed.epoch >= 0
+            ? parsed.epoch
+            : null
+        return buildState(createState(sessionId), {
+            messages: mergeMessages([], parsed.messages.map(restoreMessage)),
+            hasMore: parsed.hasMore === true,
+            oldestPositionAt: oldest?.at ?? null,
+            oldestPositionSeq: oldest?.seq ?? null,
+            newestPositionAt: newest?.at ?? null,
+            newestPositionSeq: newest?.seq ?? null,
+            epoch,
+            requiresLatestReset: parsed.messages.length > 0 && (newest === null || epoch === null)
+        })
+    } catch {
+        clearPersistedState(sessionId)
+        return null
+    }
+}
+
 function getState(sessionId: string): InternalState {
     const existing = states.get(sessionId)
     if (existing) {
         return existing
     }
-    const created = createState(sessionId)
+    const created = hydrateState(sessionId) ?? createState(sessionId)
     states.set(sessionId, created)
     return created
 }
@@ -200,6 +341,14 @@ function notifyImmediate(sessionId: string): void {
 
 function setState(sessionId: string, next: InternalState, immediate = false): void {
     states.set(sessionId, next)
+    // A latest-reset state still contains the previous server snapshot. Do not
+    // persist that stale window while the authoritative replacement is in
+    // flight; a reload during the reset must not resurrect removed messages.
+    if (next.requiresLatestReset) {
+        pendingPersistSessionIds.delete(sessionId)
+    } else {
+        schedulePersist(sessionId)
+    }
     if (immediate) {
         notifyImmediate(sessionId)
     } else {
@@ -1004,6 +1153,7 @@ export function subscribeMessageWindow(sessionId: string, listener: () => void):
 
 export function clearMessageWindow(sessionId: string): void {
     tailSyncControllers.delete(sessionId)
+    clearPersistedState(sessionId)
     const previous = states.get(sessionId)
     if (!previous) return
     setState(sessionId, {
@@ -1018,6 +1168,7 @@ function markMessageWindowForLatestReset(sessionId: string, messages: DecryptedM
     if (!previous) return
 
     tailSyncControllers.delete(sessionId)
+    clearPersistedState(sessionId)
     setState(sessionId, buildState(previous, {
         messages,
         epoch: null,
