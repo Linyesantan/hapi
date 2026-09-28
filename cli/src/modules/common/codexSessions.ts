@@ -4,6 +4,8 @@ import { basename, dirname, join, relative } from 'node:path'
 import { homedir } from 'node:os'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
 import { isCodexSubagentSource } from '@/codex/utils/codexSessionMetadata'
+import type { HistorySourceState } from '@hapi/protocol/schemas'
+import { withNativeHistoryState } from './nativeHistoryState'
 
 const DEFAULT_CODEX_SESSION_SCAN_LIMIT = 200
 
@@ -12,9 +14,11 @@ type CodexSessionIndexTitle = {
     updatedAt: string
 }
 
+import { nativeAttachmentHistory } from './nativeAttachmentHistory'
+
 type CodexImportedMessageContent = {
     role: 'user'
-    content: { type: 'text'; text: string }
+    content: { type: 'text'; text: string; attachments?: import('@hapi/protocol').AttachmentMetadata[] }
     meta: { sentFrom: 'cli' }
 } | {
     role: 'agent'
@@ -29,6 +33,7 @@ export type LocalCodexSessionSummary = {
     cwd?: string | null
     file: string
     modifiedAt: number
+    sourceState?: HistorySourceState
     originator?: string | null
     cliVersion?: string | null
     source?: string | null
@@ -60,6 +65,7 @@ function extractCodexText(value: unknown): string {
             if (record?.type === 'text' && typeof record.text === 'string') return record.text
             if (record?.type === 'input_text' && typeof record.text === 'string') return record.text
             if (record?.type === 'output_text' && typeof record.text === 'string') return record.text
+            if ((record?.type === 'summary_text' || record?.type === 'reasoning_text') && typeof record.text === 'string') return record.text
             return null
         }).filter((part): part is string => Boolean(part)).join(' ').trim()
     }
@@ -220,7 +226,7 @@ function buildImportedAgentMessage(data: unknown): CodexImportedMessageContent {
     return { role: 'agent', content: { type: AGENT_MESSAGE_PAYLOAD_TYPE, data }, meta: { sentFrom: 'cli' } }
 }
 
-function convertCodexRecordToImportedMessage(record: Record<string, unknown>): CodexImportedMessageContent | null {
+function convertCodexRecordToImportedMessage(record: Record<string, unknown>, attachments?: ReturnType<typeof nativeAttachmentHistory>): CodexImportedMessageContent | null {
     const type = asString(record.type)
     const payload = asRecord(record.payload)
     if (!type || !payload) return null
@@ -228,11 +234,17 @@ function convertCodexRecordToImportedMessage(record: Record<string, unknown>): C
         const eventType = asString(payload.type)
         if (eventType === 'user_message') {
             const text = asString(payload.message) ?? asString(payload.text) ?? asString(payload.content)
-            return text && !shouldIgnoreSyntheticUserMessage(text) ? buildImportedUserMessage(text) : null
+            if (!text || shouldIgnoreSyntheticUserMessage(text)) return null
+            const images = Array.isArray(payload.local_images) ? payload.local_images.filter((path): path is string => typeof path === 'string') : []
+            return { role: 'user', content: { type: 'text', text, attachments: attachments?.(text, images) }, meta: { sentFrom: 'cli' } }
         }
         if (eventType === 'agent_message') {
             const message = asString(payload.message)
-            return message ? buildImportedAgentMessage({ type: 'message', message, id: randomUUID() }) : null
+            return message ? buildImportedAgentMessage({ type: ['analysis', 'commentary'].includes(String(payload.channel ?? payload.phase)) ? 'reasoning' : 'message', message, id: randomUUID() }) : null
+        }
+        if (eventType === 'agent_reasoning') {
+            const message = asString(payload.text) ?? asString(payload.message)
+            return message ? buildImportedAgentMessage({ type: 'reasoning', message, id: randomUUID() }) : null
         }
         if (eventType === 'token_count') {
             const info = asRecord(payload.info)
@@ -246,8 +258,12 @@ function convertCodexRecordToImportedMessage(record: Record<string, unknown>): C
         const role = asString(payload.role)
         const text = extractCodexText(payload.content)
         if (!text || shouldIgnoreSyntheticUserMessage(text)) return null
-        if (role === 'user') return buildImportedUserMessage(text)
-        if (role === 'assistant') return buildImportedAgentMessage({ type: 'message', message: text, id: randomUUID() })
+        if (role === 'user') return { role: 'user', content: { type: 'text', text, attachments: attachments?.(text) }, meta: { sentFrom: 'cli' } }
+        if (role === 'assistant') return buildImportedAgentMessage({ type: ['analysis', 'commentary'].includes(String(payload.channel ?? payload.phase)) ? 'reasoning' : 'message', message: text, id: randomUUID() })
+    }
+    if (itemType === 'reasoning') {
+        const message = extractCodexText(payload.summary) || extractCodexText(payload.content)
+        return message ? buildImportedAgentMessage({ type: 'reasoning', message, id: randomUUID() }) : null
     }
     if (itemType === 'function_call') {
         const name = asString(payload.name)
@@ -292,7 +308,11 @@ function deduplicateAdjacentImportedMessages(messages: CodexImportedMessageConte
     let previousKey: string | null = null
     for (const message of messages) {
         const key = normalizeComparableContent(message)
-        if (key && key === previousKey) continue
+        if (key && key === previousKey) {
+            const previous = deduped[deduped.length - 1]
+            if (message.role === 'user' && message.content.attachments?.length && previous?.role === 'user' && !previous.content.attachments?.length) deduped[deduped.length - 1] = message
+            continue
+        }
         deduped.push(message)
         previousKey = key
     }
@@ -319,11 +339,13 @@ function parseCodexLocalSession(
     const messages: CodexImportedMessageContent[] = []
 
     if (includeMessages) {
+        const nativeId = inferSessionIdFromFileName(filePath)
+        const attachments = nativeId ? nativeAttachmentHistory({ agent: 'codex', sessionId: nativeId }) : undefined
         for (const line of lines) {
             let record: Record<string, unknown> | null = null
             try { record = asRecord(JSON.parse(line)) } catch { continue }
             if (!record) continue
-            const message = convertCodexRecordToImportedMessage(record)
+            const message = convertCodexRecordToImportedMessage(record, attachments)
             if (message) messages.push(message)
         }
     }
@@ -389,7 +411,7 @@ function listLocalCodexSessions(includeMessages: boolean, limit = DEFAULT_CODEX_
         const previous = deduped.get(session.id)
         if (!previous || previous.modifiedAt < session.modifiedAt) deduped.set(session.id, session)
     }
-    return Array.from(deduped.values()).sort((a, b) => b.modifiedAt - a.modifiedAt).slice(0, limit)
+    return withNativeHistoryState(Array.from(deduped.values()).sort((a, b) => b.modifiedAt - a.modifiedAt).slice(0, limit), 'codex')
 }
 
 export function listLocalCodexSessionSummaries(limit = DEFAULT_CODEX_SESSION_SCAN_LIMIT): LocalCodexSessionSummary[] {
@@ -403,10 +425,10 @@ export function listLocalCodexSessionsWithMessages(limit = DEFAULT_CODEX_SESSION
 export function listLocalCodexSessionsWithMessagesByIds(ids: Set<string>): LocalCodexSessionWithMessages[] {
     if (ids.size === 0) return []
     const sessionIndexTitles = readCodexSessionIndexTitles()
-    return listLocalCodexSessionSummaries(Number.MAX_SAFE_INTEGER)
+    return withNativeHistoryState(listLocalCodexSessionSummaries(Number.MAX_SAFE_INTEGER)
         .filter((session) => ids.has(session.id))
         .map((session) => parseCodexLocalSession(session.file, true, sessionIndexTitles))
-        .filter((session): session is LocalCodexSessionWithMessages => Boolean(session))
+        .filter((session): session is LocalCodexSessionWithMessages => Boolean(session)), 'codex')
 }
 
 

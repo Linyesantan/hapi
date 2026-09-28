@@ -1,4 +1,4 @@
-import { useState, useCallback, useEffect, useLayoutEffect, useRef, type FC, type KeyboardEvent, type PropsWithChildren, type UIEvent } from 'react'
+import { useState, useCallback, useEffect, useLayoutEffect, useRef, useId, type FC, type KeyboardEvent, type PropsWithChildren, type UIEvent } from 'react'
 import {
     useAuiState,
     type ReasoningGroupProps,
@@ -94,6 +94,7 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
     endIndex,
 }) => {
     const [isOpen, setIsOpen] = useState(false)
+    const contentId = useId()
     const scrollRef = useRef<HTMLDivElement | null>(null)
     const followLatestRef = useRef(true)
     const pointerActiveRef = useRef(false)
@@ -207,6 +208,8 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
             <button
                 type="button"
                 onClick={handleToggle}
+                aria-expanded={isOpen}
+                aria-controls={contentId}
                 className={cn(
                     'flex w-full items-center gap-1.5 px-3.5 py-2.5 text-left text-xs font-medium',
                     'text-[var(--app-hint)] hover:text-[var(--app-fg)]',
@@ -214,7 +217,7 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
                 )}
             >
                 <ChevronIcon open={isOpen} />
-                <span>Reasoning</span>
+                <span>Thinking</span>
                 {isStreaming && (
                     <span className="ml-1 flex items-center gap-1 text-[var(--app-hint)]">
                         <ShimmerDot />
@@ -223,6 +226,8 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
             </button>
 
             <div
+                id={contentId}
+                hidden={!isOpen}
                 className={cn(
                     'overflow-hidden transition-all duration-200 ease-in-out',
                     isOpen ? 'max-h-[5000px] opacity-100' : 'max-h-0 opacity-0'
@@ -244,7 +249,7 @@ export const ReasoningGroup: FC<HappyReasoningGroupProps> = ({
                     // contain is not needed to stop the two from fighting.
                     className="aui-reasoning-scroll max-h-[60vh] overflow-y-auto border-t border-[var(--app-divider)] px-3.5 py-3"
                 >
-                    {children}
+                    {isOpen ? children : null}
                 </div>
             </div>
         </div>

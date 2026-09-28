@@ -5,6 +5,7 @@ import type { SlashCommand } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { queryKeys } from '@/lib/query-keys'
 import { getBuiltinSlashCommands, mergeSlashCommands } from '@/lib/codexSlashCommands'
+import { getPhoneSlashCommands, isPhoneCli } from '@/lib/phoneSlashCommands'
 
 function levenshteinDistance(a: string, b: string): number {
     if (a.length === 0) return b.length
@@ -25,7 +26,8 @@ function levenshteinDistance(a: string, b: string): number {
 export function useSlashCommands(
     api: ApiClient | null,
     sessionId: string | null,
-    agentType: string = 'claude'
+    agentType: string = 'claude',
+    options: { unified?: boolean; sharedCodex?: boolean } = {},
 ): {
     commands: SlashCommand[]
     isLoading: boolean
@@ -44,6 +46,7 @@ export function useSlashCommands(
             return await api.getSlashCommands(sessionId)
         },
         enabled: Boolean(api && sessionId),
+        networkMode: 'always',
         // Same reasoning as useSkills: the command list is near-static, so it
         // is refetched when the user opens the menu with "/" rather than on a
         // 30s timer that runs for as long as the session is open.
@@ -57,6 +60,9 @@ export function useSlashCommands(
     // The CLI can expose agent-specific built-ins plus user/plugin/project commands;
     // keep local built-ins as an offline fallback, then append/override from RPC.
     const commands = useMemo(() => {
+        if (options.unified && isPhoneCli(agentType)) {
+            return getPhoneSlashCommands(agentType, query.data?.success ? query.data.commands : [], options.sharedCodex)
+        }
         const builtin = getBuiltinSlashCommands(agentType)
 
         if (query.data?.success && query.data.commands) {
@@ -65,7 +71,7 @@ export function useSlashCommands(
 
         // Fallback to built-in commands only
         return builtin
-    }, [agentType, query.data])
+    }, [agentType, query.data, options.unified, options.sharedCodex])
 
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {
         // Opening the menu is the one moment a stale list is visible, so

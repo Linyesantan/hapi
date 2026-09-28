@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from 'node:util'
 import { Hono } from 'hono'
 import type { PiLocalSessionSummary, PiLocalSessionWithMessages } from '@hapi/protocol/apiTypes'
 import type { Metadata } from '@hapi/protocol/types'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
 import type { Store, StoredMessage, StoredSession } from '../../store'
 import { ImportedMessageConflictError } from '../../store/messages'
 import { truncateOversizedMessageContent } from '../../store/contentCodec'
@@ -49,21 +50,24 @@ function findImportedPiSession(
     store: Store,
     namespace: string,
     machineId: string,
-    piSessionId: string
+    piSessionId: string,
+    readOnly = false
 ): StoredSession | null {
-    return importedPiSessionsById(store, namespace, machineId).get(piSessionId) ?? null
+    return importedPiSessionsById(store, namespace, machineId, readOnly).get(piSessionId) ?? null
 }
 
 function importedPiSessionsById(
     store: Store,
     namespace: string,
-    machineId: string
+    machineId: string,
+    readOnly = false
 ): Map<string, StoredSession> {
     const importedByPiId = new Map<string, StoredSession>()
     for (const session of store.sessions.getSessionsByNamespace(namespace)) {
         const metadata = storedMetadata(session)
         const piSessionId = metadata.piSessionId
         if (metadata.flavor !== 'pi'
+            || isReadOnlyHistory(metadata) !== readOnly
             || metadata.machineId !== machineId
             || typeof piSessionId !== 'string'
             || importedByPiId.has(piSessionId)) continue
@@ -97,7 +101,8 @@ function buildPiMetadata(
         archiveReason: typeof existing.archiveReason === 'string' ? existing.archiveReason : 'Imported from local Pi history',
         conversationHistoryEntryIds: entryIds as Record<string, string>,
         conversationHistoryPoints: points as Record<string, true>,
-        piImportState: state
+        piImportState: state,
+        ...(isReadOnlyHistory(existing) ? { historySourceState: transcript.sourceState ?? { state: 'unknown' as const, checkedAt: Date.now() } } : {})
     }
 }
 
@@ -220,15 +225,19 @@ export function importPiSession(options: {
     machine: Machine
     transcript: PiLocalSessionWithMessages
     existingSession?: StoredSession | null
+    readOnly?: boolean
 }): PiImportResult {
     const { store, engine, namespace, machine, transcript, existingSession } = options
     const startedAt = Date.now()
     let stored = existingSession === undefined
-        ? findImportedPiSession(store, namespace, machine.id, transcript.id)
+        ? findImportedPiSession(store, namespace, machine.id, transcript.id, options.readOnly)
         : existingSession
+    if (stored && isReadOnlyHistory(storedMetadata(stored)) !== Boolean(options.readOnly)) {
+        return { piSessionId: transcript.id, error: { code: 'history_mode_conflict', message: 'Read-only history cannot replace a controllable session' } }
+    }
     const created = !stored
     if (!stored) {
-        const metadata = buildPiMetadata(transcript, machine, {}, {
+        const metadata = buildPiMetadata(transcript, machine, options.readOnly ? { historyReadOnly: true } : {}, {
             state: 'importing',
             machineId: machine.id,
             piSessionId: transcript.id,
@@ -238,7 +247,7 @@ export function importPiSession(options: {
             leafEntryId: transcript.leafEntryId ?? null
         })
         stored = store.sessions.getOrCreateSession(
-            `pi-import:${machine.id}:${transcript.id}`,
+            `${options.readOnly ? 'pi-history' : 'pi-import'}:${machine.id}:${transcript.id}`,
             metadata,
             {},
             namespace,
@@ -261,7 +270,28 @@ export function importPiSession(options: {
     const observedLeafId = typeof currentMetadata.piHistoryLeafEntryId === 'string'
         ? currentMetadata.piHistoryLeafEntryId
         : null
-    const delta = classifyImportDelta(store.messages.getAllMessages(stored.id), transcript, observedLeafId)
+    const existingMessages = store.messages.getAllMessages(stored.id)
+    let delta = classifyImportDelta(existingMessages, transcript, observedLeafId)
+    const appended: StoredMessage[] = []
+    let replacedHistory = false
+    if (delta.error && options.readOnly && !stored.active) {
+        let prefix = 0
+        while (prefix < existingMessages.length && prefix < transcript.messages.length
+            && existingMessages[prefix].localId === transcript.messages[prefix].localId
+            && isDeepStrictEqual(existingMessages[prefix].content, truncateOversizedMessageContent(transcript.messages[prefix].content))) prefix += 1
+        const boundary = existingMessages[prefix]?.localId
+        if (boundary) {
+            store.messages.truncateMessagesFromLocalId(stored.id, boundary, transcript.messages.slice(prefix).map(message => ({
+                localId: message.localId, createdAt: message.createdAt, invokedAt: message.createdAt,
+                content: truncateOversizedMessageContent(message.content)
+            })))
+            appended.push(...store.messages.getAllMessages(stored.id).slice(prefix))
+            delta = { messages: [] }
+            replacedHistory = true
+        } else if (prefix === existingMessages.length) {
+            delta = { messages: transcript.messages.slice(prefix) }
+        }
+    }
     if (delta.error) {
         markImportState(store, engine, stored.id, namespace, transcript, machine.id, 'diverged', delta.error)
         return { piSessionId: transcript.id, hapiSessionId: stored.id, error: { code: 'transcript_diverged', message: delta.error } }
@@ -272,7 +302,6 @@ export function importPiSession(options: {
         return { piSessionId: transcript.id, hapiSessionId: stored.id, error: { code: 'session_active', message } }
     }
 
-    const appended: StoredMessage[] = []
     try {
         for (const source of delta.messages) {
             const result = store.messages.addImportedMessage(stored.id, source.content, source.localId, source.createdAt)
@@ -294,8 +323,8 @@ export function importPiSession(options: {
         .filter((localId): localId is string => Boolean(localId)))
     try {
         updateMetadataWithRetry(store, stored.id, namespace, (metadata) => {
-            const entryIds = { ...(asRecord(metadata.conversationHistoryEntryIds) ?? {}) } as Record<string, string>
-            const points = { ...(asRecord(metadata.conversationHistoryPoints) ?? {}) } as Record<string, true>
+            const entryIds = { ...(options.readOnly ? {} : asRecord(metadata.conversationHistoryEntryIds) ?? {}) } as Record<string, string>
+            const points = { ...(options.readOnly ? {} : asRecord(metadata.conversationHistoryPoints) ?? {}) } as Record<string, true>
             for (const source of transcript.messages) {
                 if (source.content.role !== 'user' || !persistedLocalIds.has(source.localId)) continue
                 entryIds[source.localId] = source.entryId
@@ -330,7 +359,7 @@ export function importPiSession(options: {
     return {
         piSessionId: transcript.id,
         hapiSessionId: stored.id,
-        action: created ? 'created' : appended.length > 0 ? 'updated' : 'unchanged',
+        action: created ? 'created' : appended.length > 0 || replacedHistory ? 'updated' : 'unchanged',
         appended: appended.length
     }
 }
@@ -377,6 +406,8 @@ export function createPiSessionRoutes(options: {
 
     app.post('/pi/import-sessions', async (c) => {
         const body = asRecord(await c.req.json().catch(() => null))
+        if (body?.readOnly !== undefined && typeof body.readOnly !== 'boolean') return c.json({ success: false, error: 'Invalid readOnly option', results: [] }, 400)
+        const readOnly = body?.readOnly === true
         const sessionIds = Array.isArray(body?.sessionIds)
             ? body.sessionIds.filter((id): id is string => typeof id === 'string' && id.trim().length > 0).map((id) => id.trim())
             : []
@@ -395,7 +426,7 @@ export function createPiSessionRoutes(options: {
         const byId = new Map(remote.sessions
             .filter((session): session is PiLocalSessionWithMessages => 'messages' in session)
             .map((session) => [session.id, session]))
-        const importedByPiId = importedPiSessionsById(options.store, namespace, machine.id)
+        const importedByPiId = importedPiSessionsById(options.store, namespace, machine.id, readOnly)
         const results: PiImportResult[] = []
         for (const sessionId of uniqueSessionIds) {
             const transcript = byId.get(sessionId)
@@ -403,13 +434,14 @@ export function createPiSessionRoutes(options: {
                 results.push({ piSessionId: sessionId, error: { code: 'not_found', message: 'Pi session transcript not found' } })
                 continue
             }
-            results.push(await importWithLock(`${namespace}:${machine.id}:${sessionId}`, () => importPiSession({
+            results.push(await importWithLock(`${namespace}:${machine.id}:${sessionId}:${readOnly}`, () => importPiSession({
                 store: options.store,
                 engine,
                 namespace,
                 machine,
                 transcript,
-                existingSession: importedByPiId.get(sessionId) ?? null
+                existingSession: importedByPiId.get(sessionId) ?? null,
+                readOnly
             })))
         }
         return c.json({ success: results.every((result) => !result.error), results, machineId: machine.id })

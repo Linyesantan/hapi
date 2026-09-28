@@ -17,12 +17,19 @@ import {
     reconcileQueuedLocalIds,
     removeOptimisticMessage,
     rewindMessageWindow,
+    restoreCachedMessageWindow,
     setMessageViewMode,
     syncTailMessages,
     updateMessageStatus,
 } from '@/lib/message-window-store'
 
 const touchedSessions = new Set<string>()
+
+async function seedCachedWindow(id: string, messages: DecryptedMessage[]): Promise<void> {
+    const response = latestResponse(messages, { epoch: 3, hasMore: true,
+        nextBeforeAt: messages[0]?.invokedAt ?? messages[0]?.createdAt, nextBeforeSeq: messages[0]?.seq ?? undefined })
+    await restoreCachedMessageWindow({ offlineCache: { readPage: async () => response } } as unknown as ApiClient, id)
+}
 
 function sessionId(name: string): string {
     const id = `message-window-v2-${name}`
@@ -387,15 +394,7 @@ describe('message tail synchronization', () => {
     it('renders a persisted window immediately, then requests a small latest tail on re-entry', async () => {
         const id = sessionId('reentry')
         const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
-        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
-            messages: [cached],
-            hasMore: true,
-            oldestPositionAt: 40_000,
-            oldestPositionSeq: 40,
-            newestPositionAt: 40_000,
-            newestPositionSeq: 40,
-            epoch: 3
-        }))
+        await seedCachedWindow(id, [cached])
 
         expect(getMessageWindowState(id).messages.map((message) => message.id)).toEqual(['cached'])
         setMessageViewMode(id, 'history')
@@ -435,15 +434,8 @@ describe('message tail synchronization', () => {
             invokedAt: null,
             status: 'queued'
         })
-        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
-            messages: [cached, queued],
-            hasMore: true,
-            oldestPositionAt: 4_000,
-            oldestPositionSeq: 40,
-            newestPositionAt: 4_000,
-            newestPositionSeq: 40,
-            epoch: 3
-        }))
+        await seedCachedWindow(id, [cached])
+        appendOptimisticMessage(id, queued)
 
         activateMessageWindow(id)
         const latest = makeAgentMessage({ id: 'latest', seq: 2_000, at: 200_000 })
@@ -585,15 +577,7 @@ describe('message tail synchronization', () => {
     it('keeps incremental synchronization for non-activation refreshes', async () => {
         const id = sessionId('incremental-refresh')
         const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
-        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
-            messages: [cached],
-            hasMore: true,
-            oldestPositionAt: 40_000,
-            oldestPositionSeq: 40,
-            newestPositionAt: 40_000,
-            newestPositionSeq: 40,
-            epoch: 3
-        }))
+        await seedCachedWindow(id, [cached])
 
         const latest = makeAgentMessage({ id: 'latest', seq: 41, at: 41_000 })
         const getMessages = vi.fn(async () => afterResponse([latest], {
@@ -814,15 +798,7 @@ describe('message tail synchronization', () => {
     it('invalidates an in-flight incremental request when re-entry prioritizes latest', async () => {
         const id = sessionId('reentry-in-flight')
         const cached = makeAgentMessage({ id: 'cached', seq: 40, at: 40_000 })
-        sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
-            messages: [cached],
-            hasMore: true,
-            oldestPositionAt: 40_000,
-            oldestPositionSeq: 40,
-            newestPositionAt: 40_000,
-            newestPositionSeq: 40,
-            epoch: 3
-        }))
+        await seedCachedWindow(id, [cached])
 
         const staleResponse = deferred<MessagesResponse>()
         const latest = makeAgentMessage({ id: 'latest', seq: 2_040, at: 2_040_000 })
@@ -1587,7 +1563,7 @@ describe('optimistic and queued-message operations', () => {
     })
 })
 
-describe('V2 persistence boundary', () => {
+describe('legacy synchronous cache boundary', () => {
     it('ignores the V1 pending-buffer state entirely', () => {
         const id = sessionId('ignore-v1')
         sessionStorage.setItem(`hapi:message-window:v1:${id}`, JSON.stringify({
@@ -1598,7 +1574,7 @@ describe('V2 persistence boundary', () => {
         expect(getMessageWindowState(id).messages).toEqual([])
     })
 
-    it('hydrates V2 sending rows as queued reconciliation candidates', () => {
+    it('does not restore or replay unconfirmed sends from the legacy cache', () => {
         const id = sessionId('hydrate-sending')
         sessionStorage.setItem(`hapi:message-window:v2:${id}`, JSON.stringify({
             messages: [makeUserMessage({
@@ -1615,8 +1591,8 @@ describe('V2 persistence boundary', () => {
             epoch: null
         }))
 
-        expect(getMessageWindowState(id).messages[0]?.status).toBe('queued')
-        expect(getQueuedReconcileCandidateLocalIds(id)).toEqual(['local-1'])
+        expect(getMessageWindowState(id).messages).toEqual([])
+        expect(getQueuedReconcileCandidateLocalIds(id)).toEqual([])
     })
 })
 

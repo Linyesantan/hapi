@@ -2,6 +2,10 @@ import { describe, expect, it } from 'vitest'
 import { getModelOptionsForFlavor, getNextModelForFlavor } from './modelOptions'
 
 describe('getModelOptionsForFlavor', () => {
+    it('Codex 目录未到达时不提供其他 CLI 的模型，快捷键也保留当前模型', () => {
+        expect(getModelOptionsForFlavor('codex', 'gpt-current', [])).toEqual([])
+        expect(getNextModelForFlavor('codex', 'gpt-current', [])).toBe('gpt-current')
+    })
     it('never offers the unsupported default reset in an active AGY session', () => {
         for (const currentModel of [null, 'auto']) {
             const options = getModelOptionsForFlavor('agy', currentModel)

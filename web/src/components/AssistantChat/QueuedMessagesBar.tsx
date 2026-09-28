@@ -342,7 +342,7 @@ export function QueuedMessagesBar({
                     <span>Queued</span>
                 </div>
                 <ul
-                    className="flex flex-col gap-1.5 max-h-32 sm:max-h-48 overflow-y-auto"
+                    className="flex flex-col gap-1.5"
                     aria-label="Queued messages"
                 >
                     {queued.map((msg) => {
@@ -514,7 +514,7 @@ export function QueuedMessagesBar({
                             >
                                 <div className="flex-1 min-w-0">
                                     {text ? (
-                                        <span className="line-clamp-3 whitespace-pre-wrap break-words text-[var(--app-fg)]">
+                                        <span className="whitespace-pre-wrap break-words text-[var(--app-fg)]">
                                             {text}
                                         </span>
                                     ) : null}

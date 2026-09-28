@@ -126,17 +126,17 @@ describe('AttachmentItem', () => {
         }
     })
 
-    it('keeps upload errors in the existing error layout', () => {
+    it('keeps the image preview and displays a useful upload error', () => {
         mocks.attachment = {
             name: 'broken.png',
             status: { type: 'incomplete', reason: 'error' },
-            previewUrl: 'data:image/png;base64,YnJva2Vu'
+            previewUrl: 'data:image/png;base64,YnJva2Vu',
+            errorMessage: '原终端暂未连接，请重试上传。'
         }
 
         renderAttachment()
 
-        expect(screen.queryByRole('img')).not.toBeInTheDocument()
-        expect(screen.getByText('Upload failed')).toBeInTheDocument()
-        expect(screen.getByText('broken.png')).toHaveClass('line-through')
+        expect(screen.getByRole('img', { name: 'broken.png' })).toBeInTheDocument()
+        expect(screen.getByRole('alert')).toHaveTextContent('原终端暂未连接，请重试上传。')
     })
 })

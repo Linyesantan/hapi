@@ -4,6 +4,7 @@ import {
     CodexCollaborationModeSchema,
     CopilotAgentModeSchema,
     DecryptedMessageSchema,
+    HistorySourceStateSchema,
     MachineSchema,
     PermissionModeSchema,
     SessionSchema
@@ -69,6 +70,27 @@ export const CreateSessionResponseSchema = z.object({
 })
 
 export type CreateSessionResponse = z.infer<typeof CreateSessionResponseSchema>
+
+export const PhoneGatewayAgentSchema = z.enum(['opencode', 'codex', 'pi'])
+export type PhoneGatewayAgent = z.infer<typeof PhoneGatewayAgentSchema>
+
+export const PhoneGatewayCreateRequestSchema = z.object({
+    agent: PhoneGatewayAgentSchema,
+    requestId: z.string().uuid(),
+    directory: z.string().trim().max(4096).refine(value => !value.includes('\0')).optional()
+}).strict()
+export type PhoneGatewayCreateRequest = z.infer<typeof PhoneGatewayCreateRequestSchema>
+
+export const PhoneGatewaySessionSchema = z.object({
+    ok: z.literal(true),
+    agent: PhoneGatewayAgentSchema,
+    session_id: z.string().min(1),
+    tmux_session: z.string().min(1),
+    tmux_socket: z.string().min(1),
+    active: z.literal(true),
+    directory: z.string()
+})
+export type PhoneGatewaySession = z.infer<typeof PhoneGatewaySessionSchema>
 
 export const HubSettingsResponseSchema = z.object({
     sessionSummaryContract: z.boolean(),
@@ -188,7 +210,7 @@ export type CursorChatStoreStatus = z.infer<typeof CursorChatStoreStatusSchema>
 export const CodexImportedMessageSchema = z.union([
     z.object({
         role: z.literal('user'),
-        content: z.object({ type: z.literal('text'), text: z.string() }),
+        content: z.object({ type: z.literal('text'), text: z.string(), attachments: z.array(AttachmentMetadataSchema).optional() }),
         meta: z.object({ sentFrom: z.literal('cli') })
     }),
     z.object({
@@ -210,6 +232,7 @@ export const CodexLocalSessionSummarySchema = z.object({
     cwd: z.string().nullable().optional(),
     file: z.string().min(1),
     modifiedAt: z.number(),
+    sourceState: HistorySourceStateSchema.optional(),
     originator: z.string().nullable().optional(),
     cliVersion: z.string().nullable().optional(),
     source: z.string().nullable().optional(),
@@ -239,6 +262,126 @@ export const ArchiveCodexSessionRpcResponseSchema = z.union([
 
 export type ListCodexSessionsRpcRequest = z.infer<typeof ListCodexSessionsRpcRequestSchema>
 export type ListCodexSessionsRpcResponse = z.infer<typeof ListCodexSessionsRpcResponseSchema>
+
+export const NativeCodexTerminalRequestSchema = z.object({
+    sessionId: z.string().uuid()
+})
+
+export const NativeTerminalRequestSchema = z.object({
+    agent: z.enum(['codex', 'opencode']),
+    sessionId: z.string().min(1).max(200)
+}).refine(value => value.agent === 'codex'
+    ? z.string().uuid().safeParse(value.sessionId).success
+    : /^ses_[a-zA-Z0-9]+$/.test(value.sessionId), 'Invalid native session')
+
+export const NativeTerminalInputSchema = z.object({
+    requestId: z.string().uuid(),
+    binding: z.string().regex(/^[a-f0-9]{64}$/),
+    text: z.string().max(32_768).refine(text => !/[\x00-\x08\x0b-\x1f\x7f]/.test(text), 'Unsupported control characters'),
+    attachments: z.array(AttachmentMetadataSchema).max(20).optional(),
+    delivery: z.enum(['queue', 'immediate']).optional()
+}).refine(value => Boolean(value.text.trim() || value.attachments?.length), 'Empty message')
+export const NativeTerminalSendRequestSchema = NativeTerminalRequestSchema.and(NativeTerminalInputSchema)
+export const NativeTerminalReceiptSchema = z.object({
+    requestId: z.string().uuid(),
+    text: z.string(),
+    createdAt: z.number(),
+    status: z.enum(['queued', 'submitted', 'confirmed', 'indeterminate', 'rejected', 'cancelled']),
+    attachments: z.array(AttachmentMetadataSchema).optional(),
+    note: z.string().optional()
+})
+export type NativeTerminalRequest = z.infer<typeof NativeTerminalRequestSchema>
+export type NativeTerminalInput = z.infer<typeof NativeTerminalInputSchema>
+export type NativeTerminalSendRequest = z.infer<typeof NativeTerminalSendRequestSchema>
+export type NativeTerminalReceipt = z.infer<typeof NativeTerminalReceiptSchema>
+export const NativeTerminalSendResponseSchema = z.union([
+    z.object({ success: z.literal(true), receipt: NativeTerminalReceiptSchema }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+export type NativeTerminalSendResponse = z.infer<typeof NativeTerminalSendResponseSchema>
+
+export const NativeModelMenuSchema = z.object({
+    kind: z.enum(['model', 'effort']),
+    title: z.string(),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/),
+    text: z.string(),
+    ansi: z.string(),
+    columns: z.number().int().positive()
+})
+export type NativeModelMenu = z.infer<typeof NativeModelMenuSchema>
+export const NativeModelActionSchema = z.object({
+    requestId: z.string().uuid(),
+    binding: z.string().regex(/^[a-f0-9]{64}$/),
+    action: z.enum(['open', 'up', 'down', 'confirm', 'cancel']),
+    fingerprint: z.string().regex(/^[a-f0-9]{64}$/).optional()
+}).refine(value => value.action === 'open' || Boolean(value.fingerprint), 'Menu snapshot required')
+export type NativeModelAction = z.infer<typeof NativeModelActionSchema>
+export const NativeModelRequestSchema = NativeTerminalRequestSchema.and(NativeModelActionSchema)
+export type NativeModelRequest = z.infer<typeof NativeModelRequestSchema>
+
+export const NativeTerminalControlSchema = z.object({
+    requestId: z.string().uuid(),
+    binding: z.string().regex(/^[a-f0-9]{64}$/),
+    action: z.enum(['interrupt', 'cancel', 'send-now']),
+    messageId: z.string().uuid().optional()
+}).refine(value => value.action === 'interrupt' || Boolean(value.messageId), 'Message required')
+export type NativeTerminalControl = z.infer<typeof NativeTerminalControlSchema>
+export const NativeTerminalControlRequestSchema = NativeTerminalRequestSchema.and(NativeTerminalControlSchema)
+export type NativeTerminalControlRequest = z.infer<typeof NativeTerminalControlRequestSchema>
+
+export const NativeTerminalUploadSchema = z.object({
+    filename: z.string().min(1).max(1_024),
+    content: z.string().max(70 * 1024 * 1024),
+    mimeType: z.string().max(200)
+})
+export const NativeTerminalUploadRequestSchema = NativeTerminalRequestSchema.and(NativeTerminalUploadSchema)
+export type NativeTerminalUploadRequest = z.infer<typeof NativeTerminalUploadRequestSchema>
+export const NativeTerminalDeleteUploadRequestSchema = NativeTerminalRequestSchema.and(z.object({ path: z.string().min(1).max(4_096) }))
+export type NativeTerminalDeleteUploadRequest = z.infer<typeof NativeTerminalDeleteUploadRequestSchema>
+
+export const NativeCodexTerminalStateSchema = z.object({
+    sessionId: z.string(),
+    checkedAt: z.number(),
+    running: z.boolean(),
+    busy: z.boolean().optional(),
+    input: z.object({ available: z.boolean(), binding: z.string().optional(), reason: z.string().optional() }).optional(),
+    submissions: z.array(NativeTerminalReceiptSchema).optional(),
+    modelMenu: NativeModelMenuSchema.optional(),
+    queue: z.object({
+        status: z.enum(['visible', 'unavailable']),
+        messages: z.array(z.object({ id: z.string(), text: z.string() })),
+        note: z.string().optional()
+    }),
+    terminal: z.object({
+        text: z.string(),
+        columns: z.number(),
+        rows: z.number()
+    }).optional()
+})
+export const NativeCodexTerminalResponseSchema = z.union([
+    z.object({ success: z.literal(true), state: NativeCodexTerminalStateSchema }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+export type NativeCodexTerminalState = z.infer<typeof NativeCodexTerminalStateSchema>
+export type NativeCodexTerminalResponse = z.infer<typeof NativeCodexTerminalResponseSchema>
+export const NativeModelResponseSchema = z.union([
+    z.object({ success: z.literal(true), requestId: z.string().uuid(),
+        status: z.enum(['submitted', 'indeterminate', 'rejected']), state: NativeCodexTerminalStateSchema }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+export type NativeModelResponse = z.infer<typeof NativeModelResponseSchema>
+export const NativeTerminalControlResponseSchema = NativeModelResponseSchema
+export type NativeTerminalControlResponse = z.infer<typeof NativeTerminalControlResponseSchema>
+
+export const PhoneQueuedMessagesResponseSchema = z.object({
+    checkedAt: z.number(),
+    sessions: z.array(z.object({
+        sessionId: z.string(),
+        messages: z.array(DecryptedMessageSchema)
+    }))
+})
+export type PhoneQueuedMessagesResponse = z.infer<typeof PhoneQueuedMessagesResponseSchema>
+
 export type ArchiveCodexSessionRpcRequest = z.infer<typeof ArchiveCodexSessionRpcRequestSchema>
 export type ArchiveCodexSessionRpcResponse = z.infer<typeof ArchiveCodexSessionRpcResponseSchema>
 
@@ -259,6 +402,7 @@ export const PiLocalSessionSummarySchema = z.object({
     cwd: z.string().nullable().optional(),
     file: z.string().min(1),
     modifiedAt: z.number(),
+    sourceState: HistorySourceStateSchema.optional(),
     model: z.string().nullable().optional(),
     thinkingLevel: z.string().nullable().optional(),
     leafEntryId: z.string().nullable().optional(),
@@ -286,6 +430,33 @@ export type PiLocalSessionSummary = z.infer<typeof PiLocalSessionSummarySchema>
 export type PiLocalSessionWithMessages = z.infer<typeof PiLocalSessionWithMessagesSchema>
 export type ListPiSessionsRpcRequest = z.infer<typeof ListPiSessionsRpcRequestSchema>
 export type ListPiSessionsRpcResponse = z.infer<typeof ListPiSessionsRpcResponseSchema>
+
+export const OpencodeLocalSessionSummarySchema = z.object({
+    id: z.string().min(1),
+    title: z.string(),
+    lastUserMessage: z.string().nullable().optional(),
+    cwd: z.string().nullable().optional(),
+    file: z.string().min(1),
+    modifiedAt: z.number(),
+    sourceState: HistorySourceStateSchema.optional()
+})
+
+export const OpencodeLocalSessionWithMessagesSchema = OpencodeLocalSessionSummarySchema.extend({
+    messages: z.array(z.object({
+        localId: z.string().min(1),
+        createdAt: z.number(),
+        content: CodexImportedMessageSchema
+    }))
+})
+
+export const ListOpencodeSessionsRpcRequestSchema = ListPiSessionsRpcRequestSchema
+export const ListOpencodeSessionsRpcResponseSchema = z.union([
+    z.object({ success: z.literal(true), sessions: z.array(z.union([OpencodeLocalSessionWithMessagesSchema, OpencodeLocalSessionSummarySchema])) }),
+    z.object({ success: z.literal(false), error: z.string() })
+])
+export type OpencodeLocalSessionSummary = z.infer<typeof OpencodeLocalSessionSummarySchema>
+export type OpencodeLocalSessionWithMessages = z.infer<typeof OpencodeLocalSessionWithMessagesSchema>
+export type ListOpencodeSessionsRpcResponse = z.infer<typeof ListOpencodeSessionsRpcResponseSchema>
 
 export const SessionCollaborationModeRequestSchema = z.object({
     mode: CodexCollaborationModeSchema

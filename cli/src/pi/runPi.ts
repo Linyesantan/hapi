@@ -89,7 +89,10 @@ export function buildPiCommandInventory(commands: readonly PiCommandSummary[]): 
     for (const command of commands) {
         if (command.source === 'skill') {
             const name = getPiSkillName(command.name);
-            if (name) skills.push({ name, description: command.description });
+            if (name) {
+                skills.push({ name, description: command.description });
+                slashCommands.push({ name: `skill:${name}`, description: command.description, source: 'plugin' });
+            }
             continue;
         }
         slashCommands.push({

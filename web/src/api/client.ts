@@ -17,6 +17,8 @@ import type {
     PermissionMode,
     PiImportSessionsResponse,
     PiLocalSessionsResponse,
+    OpencodeLocalSessionsResponse,
+    OpencodeHistorySyncResponse,
     PushSubscriptionPayload,
     PushUnsubscribePayload,
     PushVapidPublicKeyResponse,
@@ -52,6 +54,15 @@ import type {
     OpencodeModelVariantsResponse,
     OpencodeReasoningEffortResponse,
     PiModelsResponse,
+    PhoneGatewayCreateRequest,
+    PhoneGatewaySession,
+    NativeCodexTerminalResponse,
+    NativeTerminalRequest,
+    NativeTerminalInput,
+    NativeTerminalSendResponse,
+    NativeModelAction,
+    NativeModelResponse,
+    PhoneQueuedMessagesResponse,
     QueuedStateResponse,
     ReopenSessionResponse,
     SqliteStorageUsageResponse,
@@ -63,6 +74,7 @@ import type {
 import type { AgentFlavor, MessageDeliveryMode } from '@hapi/protocol'
 import type { CancelMessageResponse, SteerQueuedMessageResponse } from '@hapi/protocol/schemas'
 import type { TranscriptionMode, TranscriptionProvider, TranscriptionProviderInfo } from '@hapi/protocol/voice'
+import { isConnectionFailure, offlineCacheFor, type CachedMessagesResponse, type MessagePageOptions, type OfflineCache } from '@/lib/offline-cache'
 
 export type RetryIndeterminateMessageResponse =
     | { status: 'retried' | 'already-queued' | 'retry-unavailable'; localId: string | null }
@@ -70,6 +82,11 @@ export type RetryIndeterminateMessageResponse =
     | { status: 'not-found' }
 
 export type ProviderCredentialSource = 'env' | 'settings' | 'none'
+
+export type DshWebStatusResponse = {
+    running: boolean
+    url: string | null
+}
 
 export interface MaskedCredentialStatus {
     configured: boolean
@@ -141,7 +158,7 @@ export class ApiError extends Error {
     body?: string
 
     constructor(message: string, status: number, code?: string, body?: string) {
-        super(message)
+        super(code === 'ssh_curfew' ? 'SSH 宵禁：北京时间周一至周五 00:30–06:00 暂停网关连接和操作；已缓存记录仍可离线查看。' : message)
         this.name = 'ApiError'
         this.status = status
         this.code = code
@@ -154,12 +171,15 @@ export class ApiClient {
     private readonly baseUrl: string | null
     private readonly getToken: (() => string | null) | null
     private readonly onUnauthorized: (() => Promise<string | null>) | null
+    readonly offlineCache: OfflineCache | null
+    private catchups = new Map<string, Promise<void>>()
 
     constructor(token: string, options?: ApiClientOptions) {
         this.token = token
         this.baseUrl = options?.baseUrl ?? null
         this.getToken = options?.getToken ?? null
         this.onUnauthorized = options?.onUnauthorized ?? null
+        this.offlineCache = offlineCacheFor(this.baseUrl, token)
     }
 
     private buildUrl(path: string): string {
@@ -204,7 +224,7 @@ export class ApiClient {
                     return await this.request<T>(path, init, attempt + 1, refreshed)
                 }
             }
-            throw new Error('Session expired. Please sign in again.')
+            throw new ApiError('Session expired. Please sign in again.', 401)
         }
 
         if (!res.ok) {
@@ -221,9 +241,34 @@ export class ApiClient {
         return await res.json() as T
     }
 
+    private async readRequest<T>(path: string): Promise<T> {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            throw new TypeError('Offline')
+        }
+        return await this.request<T>(path, { signal: AbortSignal.timeout(4_000), cache: 'no-store' })
+    }
+
+    private async readCached<T>(path: string, key: string): Promise<T> {
+        try {
+            const result = await this.readRequest<T>(path)
+            void this.offlineCache?.putValue(key, result)
+            this.offlineCache?.setOffline(false)
+            return result
+        } catch (error) {
+            if (isConnectionFailure(error)) {
+                this.offlineCache?.setOffline(true)
+                const cached = await this.offlineCache?.getValue<T>(key)
+                if (cached) return cached
+            }
+            throw error
+        }
+    }
+
     async authenticate(auth: { initData: string } | { accessToken: string }): Promise<AuthResponse> {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) throw new TypeError('Offline')
         const res = await fetch(this.buildUrl('/api/auth'), {
             method: 'POST',
+            signal: AbortSignal.timeout(4_000),
             headers: { 'content-type': 'application/json' },
             body: JSON.stringify(auth)
         })
@@ -256,11 +301,30 @@ export class ApiClient {
     }
 
     async getSessions(): Promise<SessionsResponse> {
-        return await this.request<SessionsResponse>('/api/sessions')
+        return await this.readCached<SessionsResponse>('/api/sessions', 'sessions')
     }
 
     async getHealth(): Promise<HubHealthResponse> {
-        return await this.request<HubHealthResponse>('/health')
+        return await this.readCached<HubHealthResponse>('/health', 'health')
+    }
+
+    async getDshWebStatus(): Promise<DshWebStatusResponse> {
+        return await this.request<DshWebStatusResponse>('/api/dsh-web/status')
+    }
+
+    async openDshWeb(): Promise<DshWebStatusResponse> {
+        return await this.request<DshWebStatusResponse>('/api/dsh-web/open', { method: 'POST' })
+    }
+
+    async createPhoneGatewaySession(input: PhoneGatewayCreateRequest): Promise<PhoneGatewaySession> {
+        if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+            throw new Error('当前离线，未创建会话；联网后可重试。')
+        }
+        return await this.request<PhoneGatewaySession>('/api/phone-gateway/sessions', {
+            method: 'POST',
+            signal: AbortSignal.timeout(50_000),
+            body: JSON.stringify(input)
+        })
     }
 
     async getPushVapidPublicKey(): Promise<PushVapidPublicKeyResponse> {
@@ -287,7 +351,71 @@ export class ApiClient {
         if (cwd?.trim()) params.set('cwd', cwd.trim())
         if (machineId?.trim()) params.set('machineId', machineId.trim())
         const query = params.size ? `?${params.toString()}` : ''
-        return await this.request<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`)
+        return await this.readCached<CodexLocalSessionsResponse>(`/api/codex/sessions${query}`, `codex-sessions:${query}`)
+    }
+
+    async getNativeCodexTerminal(sessionId: string, machineId?: string | null): Promise<NativeCodexTerminalResponse> {
+        const params = new URLSearchParams()
+        if (machineId) params.set('machineId', machineId)
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.readCached<NativeCodexTerminalResponse>(
+            `/api/phone-gateway/native-codex/${encodeURIComponent(sessionId)}${query}`,
+            `native-codex-terminal:${machineId ?? ''}:${sessionId}`
+        )
+    }
+
+    async getPhoneQueuedMessages(): Promise<PhoneQueuedMessagesResponse> {
+        return await this.readCached<PhoneQueuedMessagesResponse>(
+            '/api/phone-gateway/queued-messages', 'phone-queued-messages'
+        )
+    }
+
+    async getNativeTerminal(request: NativeTerminalRequest, machineId?: string | null): Promise<NativeCodexTerminalResponse> {
+        const params = new URLSearchParams()
+        if (machineId) params.set('machineId', machineId)
+        const query = params.size ? `?${params.toString()}` : ''
+        try {
+            return await this.readCached<NativeCodexTerminalResponse>(
+                `/api/phone-gateway/native-terminal/${request.agent}/${encodeURIComponent(request.sessionId)}${query}`,
+                `native-terminal:${request.agent}:${machineId ?? ''}:${request.sessionId}`
+            )
+        } catch (error) {
+            if (request.agent === 'codex' && isConnectionFailure(error)) {
+                const previous = await this.offlineCache?.getValue<NativeCodexTerminalResponse>(`native-codex-terminal:${machineId ?? ''}:${request.sessionId}`)
+                if (previous) return previous
+            }
+            throw error
+        }
+    }
+
+    async sendNativeTerminalInput(sessionId: string, input: NativeTerminalInput): Promise<NativeTerminalSendResponse> {
+        return await this.request(`/api/phone-gateway/sessions/${encodeURIComponent(sessionId)}/input`, {
+            method: 'POST', body: JSON.stringify(input), signal: AbortSignal.timeout(20_000)
+        })
+    }
+
+    async controlNativeModelMenu(sessionId: string, action: NativeModelAction): Promise<NativeModelResponse> {
+        return await this.request(`/api/phone-gateway/sessions/${encodeURIComponent(sessionId)}/model`, {
+            method: 'POST', body: JSON.stringify(action), signal: AbortSignal.timeout(20_000)
+        })
+    }
+
+    async controlNativeTerminal(sessionId: string, action: import('@hapi/protocol/apiTypes').NativeTerminalControl): Promise<import('@hapi/protocol/apiTypes').NativeTerminalControlResponse> {
+        return await this.request(`/api/phone-gateway/sessions/${encodeURIComponent(sessionId)}/control`, {
+            method: 'POST', body: JSON.stringify(action), signal: AbortSignal.timeout(20_000)
+        })
+    }
+
+    async uploadNativeTerminalFile(sessionId: string, filename: string, content: string, mimeType: string): Promise<UploadFileResponse> {
+        return await this.request(`/api/phone-gateway/sessions/${encodeURIComponent(sessionId)}/upload`, {
+            method: 'POST', body: JSON.stringify({ filename, content, mimeType }), signal: AbortSignal.timeout(65_000)
+        })
+    }
+
+    async deleteNativeTerminalUpload(sessionId: string, path: string): Promise<DeleteUploadResponse> {
+        return await this.request(`/api/phone-gateway/sessions/${encodeURIComponent(sessionId)}/upload/delete`, {
+            method: 'POST', body: JSON.stringify({ path })
+        })
     }
 
     async getPiSessions(cwd?: string | null, machineId?: string | null): Promise<PiLocalSessionsResponse> {
@@ -295,14 +423,26 @@ export class ApiClient {
         if (cwd?.trim()) params.set('cwd', cwd.trim())
         if (machineId?.trim()) params.set('machineId', machineId.trim())
         const query = params.size ? `?${params.toString()}` : ''
-        return await this.request<PiLocalSessionsResponse>(`/api/pi/sessions${query}`)
+        return await this.readCached<PiLocalSessionsResponse>(`/api/pi/sessions${query}`, `pi-sessions:${query}`)
     }
 
-    async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null }): Promise<PiImportSessionsResponse> {
+    async importPiSessions(payload: { sessionIds: string[]; cwd?: string | null; machineId?: string | null; readOnly?: boolean }): Promise<PiImportSessionsResponse> {
         return await this.request<PiImportSessionsResponse>('/api/pi/import-sessions', {
             method: 'POST',
             body: JSON.stringify(payload)
         })
+    }
+
+    async getOpencodeSessions(cwd?: string | null, machineId?: string | null): Promise<OpencodeLocalSessionsResponse> {
+        const params = new URLSearchParams()
+        if (cwd?.trim()) params.set('cwd', cwd.trim())
+        if (machineId?.trim()) params.set('machineId', machineId.trim())
+        const query = params.size ? `?${params.toString()}` : ''
+        return await this.readCached<OpencodeLocalSessionsResponse>(`/api/opencode/sessions${query}`, `opencode-sessions:${query}`)
+    }
+
+    async syncOpencodeSession(payload: { sessionIds: string[]; machineId?: string | null; readOnly: true }): Promise<OpencodeHistorySyncResponse> {
+        return await this.request<OpencodeHistorySyncResponse>('/api/opencode/sync-session', { method: 'POST', body: JSON.stringify(payload) })
     }
 
     async archiveCodexSession(sessionId: string, machineId?: string | null): Promise<CodexArchiveSessionResponse> {
@@ -353,7 +493,14 @@ export class ApiClient {
     }
 
     async getSession(sessionId: string): Promise<SessionResponse> {
-        return await this.request<SessionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}`)
+        try {
+            return await this.readCached<SessionResponse>(`/api/sessions/${encodeURIComponent(sessionId)}`, `session:${sessionId}`)
+        } catch (error) {
+            if (error instanceof ApiError && [403, 404].includes(error.status)) {
+                await this.offlineCache?.invalidate(sessionId, true)
+            }
+            throw error
+        }
     }
 
     async getSessionExport(
@@ -369,17 +516,66 @@ export class ApiClient {
 
     async getMessages(
         sessionId: string,
-        options: {
-            beforeSeq?: number | null
-            beforeAt?: number | null
-            afterSeq?: number | null
-            afterAt?: number | null
-            untilSeq?: number | null
-            untilAt?: number | null
-            epoch?: number | null
-            limit?: number
+        options: MessagePageOptions
+    ): Promise<CachedMessagesResponse> {
+        if (options.beforeAt != null && this.offlineCache?.getStatus() === 'offline') {
+            const cached = await this.offlineCache.readPage(sessionId, options)
+            if (cached) return cached
         }
-    ): Promise<MessagesResponse> {
+        try {
+            // SSE can arrive before REST recovery. Fill from the last confirmed
+            // HTTP cursor, not from the newest message rendered on screen.
+            if (options.beforeAt == null) await this.catchUpCachedMessages(sessionId)
+            const ticket = this.offlineCache?.beginRead(sessionId)
+            const response = await this.fetchMessagePage(sessionId, options)
+            await this.offlineCache?.recordPage(sessionId, response, ticket)
+            this.offlineCache?.setOffline(false)
+            return response
+        } catch (error) {
+            if (isConnectionFailure(error)) {
+                this.offlineCache?.setOffline(true)
+                const cached = await this.offlineCache?.readPage(sessionId, options)
+                if (cached) return cached
+            }
+            if (error instanceof ApiError && [403, 404].includes(error.status)) {
+                await this.offlineCache?.invalidate(sessionId, true)
+            }
+            throw error
+        }
+    }
+
+    private async catchUpCachedMessages(sessionId: string): Promise<void> {
+        if (!this.offlineCache) return
+        const existing = this.catchups.get(sessionId)
+        if (existing) return await existing
+        const cache = this.offlineCache
+        const run = async () => {
+            const checkpoint = await cache.getCheckpoint(sessionId)
+            if (!checkpoint?.head) return
+            let after = checkpoint.head
+            let until: { at: number; seq: number } | null = null
+            while (true) {
+                const ticket = cache.beginRead(sessionId)
+                const response = await this.fetchMessagePage(sessionId, {
+                    afterAt: after.at, afterSeq: after.seq, epoch: checkpoint.epoch,
+                    untilAt: until?.at, untilSeq: until?.seq, limit: 200
+                })
+                await cache.recordPage(sessionId, response, ticket)
+                if (response.page.reset || response.page.direction !== 'after' || !response.page.hasMore) return
+                const { nextAfterAt: at, nextAfterSeq: seq, snapshotHeadAt, snapshotHeadSeq } = response.page
+                if (at == null || seq == null || at < after.at || (at === after.at && seq <= after.seq)) {
+                    throw new Error('Message catch-up cursor did not advance')
+                }
+                after = { at, seq }
+                if (!until && snapshotHeadAt != null && snapshotHeadSeq != null) until = { at: snapshotHeadAt, seq: snapshotHeadSeq }
+            }
+        }
+        const promise = run()
+        this.catchups.set(sessionId, promise)
+        try { await promise } finally { if (this.catchups.get(sessionId) === promise) this.catchups.delete(sessionId) }
+    }
+
+    private async fetchMessagePage(sessionId: string, options: MessagePageOptions): Promise<MessagesResponse> {
         const params = new URLSearchParams()
         if (options.beforeAt !== undefined && options.beforeAt !== null) {
             params.set('beforeAt', `${options.beforeAt}`)
@@ -408,7 +604,7 @@ export class ApiClient {
 
         const qs = params.toString()
         const url = `/api/sessions/${encodeURIComponent(sessionId)}/messages${qs ? `?${qs}` : ''}`
-        return await this.request<MessagesResponse>(url)
+        return await this.readRequest<MessagesResponse>(url)
     }
 
     async getGitStatus(sessionId: string): Promise<GitCommandResponse> {
@@ -756,7 +952,7 @@ export class ApiClient {
     }
 
     async getMachines(): Promise<MachinesResponse> {
-        return await this.request<MachinesResponse>('/api/machines')
+        return await this.readCached<MachinesResponse>('/api/machines', 'machines')
     }
 
     /** Pass an empty string to clear the custom name and fall back to the hostname. */
@@ -992,8 +1188,8 @@ export class ApiClient {
     }
 
     async getSlashCommands(sessionId: string): Promise<SlashCommandsResponse> {
-        return await this.request<SlashCommandsResponse>(
-            `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`
+        return await this.readCached<SlashCommandsResponse>(
+            `/api/sessions/${encodeURIComponent(sessionId)}/slash-commands`, `slash-commands:${sessionId}`
         )
     }
 
@@ -1035,6 +1231,7 @@ export class ApiClient {
         await this.request(`/api/sessions/${encodeURIComponent(sessionId)}`, {
             method: 'DELETE'
         })
+        await this.offlineCache?.invalidate(sessionId, true)
     }
 
     /*

@@ -14,6 +14,7 @@ import type { SyncEvent } from '../sync/syncEngine'
 import { TerminalRegistry } from './terminalRegistry'
 import { clearUserTerminalBuffer } from './userTerminalBuffer'
 import type { CliSocketWithData, SocketData, SocketServer } from './socketTypes'
+import { phoneCurfewState } from '../web/phoneCurfew'
 
 const jwtPayloadSchema = z.object({
     uid: z.number(),
@@ -139,6 +140,7 @@ export function createSocketServer(deps: SocketServerDeps): {
     }))
 
     terminalNs.use(async (socket, next) => {
+        if (phoneCurfewState().restricted) return next(new Error(phoneCurfewState().message))
         const auth = socket.handshake.auth as Record<string, unknown> | undefined
         const token = typeof auth?.token === 'string' ? auth.token : null
         if (!token) {
@@ -159,7 +161,18 @@ export function createSocketServer(deps: SocketServerDeps): {
             return next(new Error('Invalid token'))
         }
     })
-    terminalNs.on('connection', (socket) => registerTerminalHandlers(socket, {
+    terminalNs.on('connection', (socket) => {
+        socket.use((_packet, next) => {
+            if (phoneCurfewState().restricted) { socket.disconnect(true); return }
+            next()
+        })
+        const access = phoneCurfewState()
+        if (access.enabled) {
+            const timer = setTimeout(() => socket.disconnect(true), Math.max(0, access.nextChangeAt - Date.now()))
+            timer.unref()
+            socket.once('disconnect', () => clearTimeout(timer))
+        }
+        registerTerminalHandlers(socket, {
         io,
         getSession: (sessionId) => {
             return deps.getSession?.(sessionId) ?? deps.store.sessions.getSession(sessionId)
@@ -167,7 +180,8 @@ export function createSocketServer(deps: SocketServerDeps): {
         terminalRegistry,
         maxTerminalsPerSocket,
         maxTerminalsPerSession
-    }))
+        })
+    })
 
     return { io, engine, rpcRegistry }
 }

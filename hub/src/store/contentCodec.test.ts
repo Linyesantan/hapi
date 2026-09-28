@@ -35,6 +35,18 @@ describe('encodeMessageContent / decodeMessageContent', () => {
 })
 
 describe('truncateOversizedMessageContent', () => {
+    it('preserves complete output when the offline archive enables it', () => {
+        const previous = process.env.HAPI_PRESERVE_OUTPUT
+        process.env.HAPI_PRESERVE_OUTPUT = '1'
+        try {
+            const content = { role: 'agent', content: { type: 'output', data: big(1024 * 1024) } }
+            expect(truncateOversizedMessageContent(content)).toBe(content)
+            expect(decodeMessageContent(encodeMessageContent(content))).toEqual(content)
+        } finally {
+            if (previous === undefined) delete process.env.HAPI_PRESERVE_OUTPUT
+            else process.env.HAPI_PRESERVE_OUTPUT = previous
+        }
+    })
     it('truncates oversized strings nested in agent content, keeping head and tail', () => {
         const payload = `HEAD${big(TRUNCATE_STRING_LIMIT * 3)}TAIL`
         const content = {

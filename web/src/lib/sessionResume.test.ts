@@ -19,6 +19,13 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe('sessionResume', () => {
+    it('只读 Codex 记录即使有原生 ID 或活动标记也不能自动恢复', () => {
+        for (const active of [false, true]) {
+            expect(inactiveSessionCanResume(makeSession({ active, metadata: {
+                path: '/work', host: 'pc', flavor: 'codex', codexSessionId: 'original', codexHistoryReadOnly: true,
+            } }), 10)).toBe(false)
+        }
+    })
     it('resolveAgentSessionIdFromMetadata picks the id matching the session flavor', () => {
         expect(resolveAgentSessionIdFromMetadata({
             path: '/p',

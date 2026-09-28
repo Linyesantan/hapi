@@ -359,6 +359,8 @@ export default {
   'newSession.type.worktree.placeholder': 'feature-x (默认 1228-xxxx)',
   'newSession.agent': '代理',
   'newSession.agentAvailabilityLoading': '正在检查已安装的 Agent…',
+  'newSession.dshWebRunning': 'DSH Web 运行中',
+  'newSession.dshWebOpen': '打开',
   'newSession.agentAvailabilityFailed': '无法检查已安装的 Agent。',
   'newSession.runnerUpgradeRequired': '创建会话前，请升级并重启此机器上的 HAPI runner。',
   'newSession.noAvailableAgents': '此机器上没有安装受支持的 Agent。',

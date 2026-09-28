@@ -8,6 +8,14 @@ describe('StatusBar context details popover', () => {
         localStorage.clear()
     })
 
+    it('shows a running native terminal as read-only instead of gateway offline', () => {
+        render(<I18nProvider><StatusBar active={false} thinking={false} agentState={null} historyReadOnly
+            historySourceState={{ state: 'running', checkedAt: Date.now() }} /></I18nProvider>)
+        expect(screen.getByText('原终端运行中')).toBeInTheDocument()
+        expect(screen.queryByText('offline')).toBeNull()
+        expect(screen.queryByText('online')).toBeNull()
+    })
+
     it('keeps stable connection labels in English and offsets the whole left status', () => {
         localStorage.setItem('hapi-lang', 'zh-CN')
         const { rerender } = render(

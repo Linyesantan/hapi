@@ -1,6 +1,10 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { ApiClient, ApiError } from '@/api/client'
 import type { AuthResponse } from '@/types/api'
+import { forgetOfflineAuth, readOfflineAuth, rememberOfflineAuth } from '@/lib/offline-auth'
+import { isConnectionFailure, offlineCacheFor, offlineScope } from '@/lib/offline-cache'
+import { setMessageWindowScope } from '@/lib/message-window-store'
+import { queryClient } from '@/lib/query-client'
 
 export type AuthSource =
     | { type: 'telegram'; initData: string }
@@ -64,6 +68,23 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
     const refreshPromiseRef = useRef<Promise<string | null> | null>(null)
     const tokenRef = useRef<string | null>(null)
     const lastRefreshAttemptRef = useRef<number>(0)
+    const scopeRef = useRef<string | null>(null)
+    const authNetworkFailureRef = useRef(false)
+
+    const acceptAuth = useCallback((auth: AuthResponse, source: AuthSource, remember = true) => {
+        const scope = offlineScope(baseUrl, auth.token)
+        if (scope !== scopeRef.current) {
+            queryClient.clear()
+            setMessageWindowScope(scope)
+            scopeRef.current = scope
+        }
+        tokenRef.current = auth.token
+        setToken(auth.token)
+        setUser(auth.user)
+        setError(null)
+        setNeedsBinding(false)
+        if (remember && source.type === 'accessToken') void rememberOfflineAuth(baseUrl, source.token, auth)
+    }, [baseUrl])
 
     // Stable reference for auth source to use in effects
     const authSourceRef = useRef(authSource)
@@ -102,13 +123,20 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
             try {
                 const client = new ApiClient('', { baseUrl })
                 const auth = await client.authenticate(getAuthPayload(currentSource))
-                tokenRef.current = auth.token
-                setToken(auth.token)
-                setUser(auth.user)
-                setError(null)
-                setNeedsBinding(false)
+                if (authSourceRef.current !== currentSource) return null
+                authNetworkFailureRef.current = false
+                acceptAuth(auth, currentSource)
+                offlineCacheFor(baseUrl, auth.token)?.setOffline(false)
                 return auth.token
             } catch (error) {
+                if (authSourceRef.current !== currentSource) return null
+                if (isConnectionFailure(error)) {
+                    authNetworkFailureRef.current = true
+                    if (currentToken) offlineCacheFor(baseUrl, currentToken)?.setOffline(true)
+                    return null // expired JWT still identifies the local read-only cache
+                }
+                authNetworkFailureRef.current = false
+                forgetOfflineAuth(baseUrl)
                 if (currentSource.type === 'telegram' && isNotBoundError(error)) {
                     tokenRef.current = null
                     setToken(null)
@@ -118,7 +146,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                     return null
                 }
                 const isExpired = expMs ? Date.now() >= expMs : false
-                if (options?.hardFail || isExpired) {
+                if (options?.hardFail || isExpired || (error instanceof ApiError && [401, 403].includes(error.status))) {
                     tokenRef.current = null
                     setToken(null)
                     setUser(null)
@@ -141,7 +169,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
                 refreshPromiseRef.current = null
             }
         }
-    }, [baseUrl])
+    }, [baseUrl, acceptAuth])
 
     const bind = useCallback(async (accessToken: string) => {
         const currentSource = authSourceRef.current
@@ -177,15 +205,20 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
     // `api`'s identity, which remounts everything keyed on it (VoiceBackendSession `[props.api]`,
     // GeneratedImageCard `[ctx.api, ...]`) and drives the remount/refetch storm. Issue #927.
     const hasToken = token !== null
+    const authScope = token ? offlineScope(baseUrl, token) : null
     const api = useMemo(() => (
         hasToken
             ? new ApiClient(tokenRef.current ?? '', {
                 baseUrl,
                 getToken: () => tokenRef.current,
-                onUnauthorized: () => refreshAuth({ force: true })
+                onUnauthorized: async () => {
+                    const refreshed = await refreshAuth({ force: true })
+                    if (!refreshed && authNetworkFailureRef.current) throw new TypeError('Offline')
+                    return refreshed
+                }
             })
             : null
-    ), [baseUrl, refreshAuth, hasToken])
+    ), [baseUrl, refreshAuth, hasToken, authScope])
 
     useEffect(() => {
         let isCancelled = false
@@ -193,6 +226,12 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
         async function run() {
             if (!authSource) {
                 // No auth source - waiting for login
+                tokenRef.current = null
+                setToken(null)
+                setUser(null)
+                setMessageWindowScope(null)
+                scopeRef.current = null
+                queryClient.clear()
                 setNeedsBinding(false)
                 return
             }
@@ -200,15 +239,39 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
             setIsLoading(true)
             setError(null)
             setNeedsBinding(false)
+            tokenRef.current = null
+            setToken(null)
+            setUser(null)
+            setMessageWindowScope(null)
+            scopeRef.current = null
+            queryClient.clear()
+            if (authSource.type === 'accessToken') {
+                const cached = await readOfflineAuth(baseUrl, authSource.token)
+                if (isCancelled) return
+                if (cached) {
+                    acceptAuth(cached, authSource, false)
+                    offlineCacheFor(baseUrl, cached.token)?.setOffline(true)
+                    setIsLoading(false)
+                }
+            }
             try {
                 const client = new ApiClient('', { baseUrl }) // temporary for auth call
                 const auth = await client.authenticate(getAuthPayload(authSource))
                 if (isCancelled) return
-                setToken(auth.token)
-                setUser(auth.user)
-                setNeedsBinding(false)
+                acceptAuth(auth, authSource)
+                authNetworkFailureRef.current = false
+                offlineCacheFor(baseUrl, auth.token)?.setOffline(false)
             } catch (e) {
                 if (isCancelled) return
+                if (isConnectionFailure(e) && tokenRef.current) {
+                    authNetworkFailureRef.current = true
+                    offlineCacheFor(baseUrl, tokenRef.current)?.setOffline(true)
+                    return
+                }
+                forgetOfflineAuth(baseUrl)
+                tokenRef.current = null
+                setToken(null)
+                setUser(null)
                 if (authSource.type === 'telegram' && isNotBoundError(e)) {
                     setToken(null)
                     setUser(null)
@@ -230,7 +293,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
         return () => {
             isCancelled = true
         }
-    }, [authSource, baseUrl])
+    }, [authSource, baseUrl, acceptAuth])
 
     useEffect(() => {
         tokenRef.current = null
@@ -266,7 +329,7 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
             if (isCancelled) return
             const refreshed = await refreshAuth({ force: true })
             if (isCancelled) return
-            if (!refreshed && Date.now() < expMs) {
+            if (!refreshed && tokenRef.current) {
                 schedule(15_000)
             }
         }
@@ -297,10 +360,12 @@ export function useAuth(authSource: AuthSource | null, baseUrl: string): {
         }
 
         window.addEventListener('focus', handleActive)
+        window.addEventListener('online', handleActive)
         document.addEventListener('visibilitychange', handleVisibilityChange)
 
         return () => {
             window.removeEventListener('focus', handleActive)
+            window.removeEventListener('online', handleActive)
             document.removeEventListener('visibilitychange', handleVisibilityChange)
         }
     }, [authSource, refreshAuth])

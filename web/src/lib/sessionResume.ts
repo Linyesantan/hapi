@@ -1,4 +1,5 @@
 import { isKnownFlavor } from '@hapi/protocol'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
 import type { Session } from '@/types/api'
 
 /** Agent thread id used by hub `resolveAgentResumeId`, flavor-specific.
@@ -43,6 +44,7 @@ export function inactiveSessionCanResume(
     userMessageCount: number,
     cursorChatOnDisk?: boolean,
 ): boolean {
+    if (isReadOnlyHistory(session.metadata)) return false
     if (session.active) {
         return true
     }

@@ -2,22 +2,27 @@ import type { AttachmentAdapter, PendingAttachment, CompleteAttachment, Attachme
 import type { ApiClient } from '@/api/client'
 import type { AttachmentMetadata } from '@/types/api'
 import { isImageMimeType } from '@/lib/fileAttachments'
+import { attachmentMimeType, largeImagePreview, textAttachmentPreview } from '@/lib/attachmentPreview'
 import { randomId } from '@/lib/randomId'
+import { apiErrorMessage } from '@/lib/apiErrorMessage'
 import { getRestoredUploadMetadata } from '@/lib/composer-attachment-drafts'
 import type { AttachmentDraftHandoff } from '@/lib/composer-draft-transfer'
 
 /** Composer / share upload ceiling — keep deep-link fetch in sync. */
 export const MAX_UPLOAD_BYTES = 50 * 1024 * 1024
-const MAX_PREVIEW_BYTES = 5 * 1024 * 1024
+const MAX_PREVIEW_BYTES = 160 * 1024
 
 type PendingUploadAttachment = PendingAttachment & {
     path?: string
     previewUrl?: string
     uploadSessionId?: string
+    previewText?: string
+    previewTruncated?: boolean
+    errorMessage?: string
 }
 
 export function createAttachmentAdapter(
-    api: ApiClient,
+    api: Pick<ApiClient, 'uploadFile' | 'deleteUploadFile'>,
     sessionId: string,
     resolveSessionId?: () => Promise<string>,
     // Always hand off after resume merges into a new session id — even when
@@ -55,28 +60,35 @@ export function createAttachmentAdapter(
                     id: restored.id,
                     type: 'file',
                     name: file.name,
-                    contentType: file.type || 'application/octet-stream',
+                    contentType: attachmentMimeType(file),
                     file,
                     status: { type: 'requires-action', reason: 'composer-send' },
                     path: restored.path,
                     previewUrl: restored.previewUrl,
                     uploadSessionId: restored.uploadSessionId,
+                    ...await textAttachmentPreview(file, attachmentMimeType(file)),
                 } as PendingUploadAttachment
                 return
             }
 
             const id = restored?.id ?? randomId()
-            const contentType = file.type || 'application/octet-stream'
+            const contentType = attachmentMimeType(file)
+            let previewUrl: string | undefined
+            let textPreview: { previewText?: string; previewTruncated?: boolean } = {}
 
             try {
-                let previewUrl: string | undefined
+                let originalDataUrl: string | undefined
                 if (isImageMimeType(contentType) && file.size <= MAX_PREVIEW_BYTES) {
                     try {
-                        previewUrl = await fileToDataUrl(file)
+                        originalDataUrl = await fileToDataUrl(file)
+                        previewUrl = originalDataUrl.replace(/^data:[^;,]*;/, `data:${contentType};`)
                     } catch {
                         // Preview generation is optional; retry the read for the upload payload below.
                     }
+                } else if (isImageMimeType(contentType) && file.size <= MAX_UPLOAD_BYTES) {
+                    previewUrl = await largeImagePreview(file)
                 }
+                textPreview = await textAttachmentPreview(file, contentType)
 
                 yield {
                     id,
@@ -85,7 +97,7 @@ export function createAttachmentAdapter(
                     contentType,
                     file,
                     status: { type: 'running', reason: 'uploading', progress: 0 },
-                    previewUrl
+                    previewUrl, ...textPreview
                 } as PendingUploadAttachment
 
                 if (cancelledAttachmentIds.has(id)) {
@@ -99,8 +111,9 @@ export function createAttachmentAdapter(
                         name: file.name,
                         contentType,
                         file,
-                        status: { type: 'incomplete', reason: 'error' }
-                    }
+                        status: { type: 'incomplete', reason: 'error' },
+                        errorMessage: '文件超过 50 MB，请选择更小的文件。'
+                    } as PendingUploadAttachment
                     return
                 }
 
@@ -121,8 +134,8 @@ export function createAttachmentAdapter(
                     return
                 }
 
-                const content = previewUrl
-                    ? base64FromDataUrl(previewUrl)
+                const content = originalDataUrl
+                    ? base64FromDataUrl(originalDataUrl)
                     : await fileToBase64(file)
 
                 if (cancelledAttachmentIds.has(id)) {
@@ -136,7 +149,7 @@ export function createAttachmentAdapter(
                     contentType,
                     file,
                     status: { type: 'running', reason: 'uploading', progress: 50 },
-                    previewUrl
+                    previewUrl, ...textPreview
                 } as PendingUploadAttachment
 
                 const result = await api.uploadFile(uploadSessionId, file.name, content, contentType)
@@ -154,8 +167,9 @@ export function createAttachmentAdapter(
                         name: file.name,
                         contentType,
                         file,
-                        status: { type: 'incomplete', reason: 'error' }
-                    }
+                        status: { type: 'incomplete', reason: 'error' }, previewUrl, ...textPreview,
+                        errorMessage: result.error || '上传失败，请重新选择文件。'
+                    } as PendingUploadAttachment
                     return
                 }
 
@@ -168,18 +182,20 @@ export function createAttachmentAdapter(
                     status: { type: 'requires-action', reason: 'composer-send' },
                     path: result.path,
                     previewUrl,
+                    ...textPreview,
                     uploadSessionId,
                 } as PendingUploadAttachment
 
-            } catch {
+            } catch (error) {
                 yield {
                     id,
                     type: 'file',
                     name: file.name,
                     contentType,
                     file,
-                    status: { type: 'incomplete', reason: 'error' }
-                }
+                    status: { type: 'incomplete', reason: 'error' }, previewUrl, ...textPreview,
+                    errorMessage: apiErrorMessage(error, '上传失败，请重新选择文件。')
+                } as PendingUploadAttachment
             }
         },
 
@@ -193,6 +209,7 @@ export function createAttachmentAdapter(
         async send(attachment: PendingAttachment): Promise<CompleteAttachment> {
             const pending = attachment as PendingUploadAttachment
             const path = pending.path
+            if (!path) throw new Error('附件还没有上传成功，请重试。')
 
             // Build AttachmentMetadata to be sent with the message
             const metadata: AttachmentMetadata | undefined = path ? {
@@ -201,7 +218,9 @@ export function createAttachmentAdapter(
                 mimeType: attachment.contentType ?? 'application/octet-stream',
                 size: attachment.file?.size ?? 0,
                 path,
-                previewUrl: pending.previewUrl
+                previewUrl: pending.previewUrl,
+                previewText: pending.previewText,
+                previewTruncated: pending.previewTruncated
             } : undefined
 
             return {

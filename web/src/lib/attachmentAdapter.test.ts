@@ -96,6 +96,19 @@ describe('attachmentAdapter', () => {
 })
 
 describe('attachmentAdapter image previews', () => {
+    it('infers an image MIME type when Android provides only a filename', async () => {
+        const file = new File(['image'], '手机截图.PNG')
+        const { emitted, uploadFile } = await collectAdditions(file)
+        expect(emitted.at(-1)).toMatchObject({ contentType: 'image/png', previewUrl: 'data:image/png;base64,aW1hZ2U=' })
+        expect(uploadFile).toHaveBeenCalledWith('session-1', '手机截图.PNG', 'aW1hZ2U=', 'image/png')
+    })
+    it('keeps a small text preview while uploading the entire original file', async () => {
+        const content = '完整中文附件\n'.repeat(2500)
+        const { emitted, uploadFile } = await collectAdditions(new File([content], '说明.txt', { type: 'text/plain' }))
+        expect(emitted.at(-1)).toMatchObject({ previewTruncated: true })
+        expect(String(emitted.at(-1)?.previewText)).toHaveLength(12_000)
+        expect(uploadFile).toHaveBeenCalledWith('session-1', '说明.txt', Buffer.from(content).toString('base64'), 'text/plain')
+    })
     it('includes the preview URL in every image upload state', async () => {
         const file = new File(['image'], 'photo.png', { type: 'image/png' })
         const readSpy = vi.spyOn(FileReader.prototype, 'readAsDataURL')

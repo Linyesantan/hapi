@@ -21,6 +21,11 @@ import { App } from '@/App'
 import { SessionChat } from '@/components/SessionChat'
 import { SessionList } from '@/components/SessionList'
 import { NewSession } from '@/components/NewSession'
+import { PhoneGatewayNewSession } from '@/components/PhoneGatewayNewSession'
+import { PhoneHistorySessions } from '@/components/PhoneHistorySessions'
+import { PhoneActivity } from '@/components/PhoneActivity'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
+import { historyAgent, historySourceId, syncHistorySession } from '@/lib/phoneHistory'
 import { WorkspaceBrowser } from '@/components/WorkspaceBrowser'
 import { LoadingState } from '@/components/LoadingState'
 import { useAppContext } from '@/lib/app-context'
@@ -156,7 +161,8 @@ function SettingsIcon(props: { className?: string }) {
 }
 
 function SessionsPage() {
-    const { api, baseUrl, titleSuggestionAvailable = false } = useAppContext()
+    const { api, baseUrl, titleSuggestionAvailable = false, phoneGatewayEnabled } = useAppContext()
+    const queryClient = useQueryClient()
     const navigate = useNavigate()
     const pathname = useLocation({ select: location => location.pathname })
     const matchRoute = useMatchRoute()
@@ -169,6 +175,7 @@ function SessionsPage() {
         return (async () => {
             try {
                 await refetch()
+                if (phoneGatewayEnabled) await queryClient.invalidateQueries({ queryKey: queryKeys.phoneHistorySessionsRoot })
             } catch (error) {
                 addToast({
                     title: t('sessions.refresh.failed.title'),
@@ -178,7 +185,7 @@ function SessionsPage() {
                 })
             }
         })()
-    }, [addToast, refetch, t])
+    }, [addToast, refetch, t, phoneGatewayEnabled, queryClient])
 
     const machineLabelsById = useMachineLabels(machines)
     const machinesById = useMemo(() => {
@@ -235,7 +242,11 @@ function SessionsPage() {
                     ) : null}
                     <SessionList
                         key={initializedHub === baseUrl ? 'last-seen-ready' : 'last-seen-pending'}
-                        sessions={sessions}
+                        sessions={phoneGatewayEnabled ? sessions.filter(session => !isReadOnlyHistory(session.metadata)) : sessions}
+                        leadingContent={phoneGatewayEnabled ? <PhoneActivity api={api} sessions={sessions}
+                            onSelect={sessionId => navigate(getSessionListSelectionNavigation(sessionId))} /> : undefined}
+                        extraContent={phoneGatewayEnabled ? <PhoneHistorySessions api={api} sessions={sessions}
+                            selectedSessionId={selectedSessionId} onSelect={sessionId => navigate(getSessionListSelectionNavigation(sessionId))} /> : undefined}
                         selectedSessionId={selectedSessionId}
                         onSelect={(sessionId) => navigate(getSessionListSelectionNavigation(sessionId))}
                         onNewSession={() => navigate({
@@ -334,7 +345,7 @@ function classifySendError(
 }
 
 function SessionPage() {
-    const { api, titleSuggestionAvailable = false } = useAppContext()
+    const { api, titleSuggestionAvailable = false, phoneGatewayEnabled } = useAppContext()
     const { t } = useTranslation()
     const goBack = useAppGoBack()
     const navigate = useNavigate()
@@ -655,7 +666,10 @@ function SessionPage() {
     const {
         commands: slashCommands,
         getSuggestions: getSlashSuggestions,
-    } = useSlashCommands(api, sessionId, agentType)
+    } = useSlashCommands(api, sessionId, agentType, {
+        unified: phoneGatewayEnabled,
+        sharedCodex: session?.metadata?.capabilities?.concurrentClients,
+    })
     const {
         getSuggestions: getSkillSuggestions,
     } = useSkills(api, sessionId)
@@ -735,12 +749,46 @@ function SessionPage() {
         getSlashSuggestions,
     ])
 
-    const refreshSelectedSession = useCallback(async () => {
-        await Promise.all([
-            refetchSession(),
-            refetchMessages(),
-        ])
-    }, [refetchMessages, refetchSession])
+    const historyReadOnly = isReadOnlyHistory(session?.metadata)
+    const selectedHistoryAgent = historyAgent(session?.metadata?.flavor)
+    const selectedHistorySourceId = historySourceId(session?.metadata ?? null)
+    const historyMachineId = session?.metadata?.machineId
+    const historyRefreshInFlight = useRef<{ sessionId: string; promise: Promise<void> } | null>(null)
+    const refreshSelectedSession = useCallback(() => {
+        if (historyRefreshInFlight.current?.sessionId === sessionId) return historyRefreshInFlight.current.promise
+        const promise = (async () => {
+            if (historyReadOnly && selectedHistoryAgent && selectedHistorySourceId && api && navigator.onLine) {
+                const updatedId = await syncHistorySession(api, selectedHistoryAgent, selectedHistorySourceId, historyMachineId)
+                if (updatedId && updatedId !== sessionId) {
+                    void queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+                    await navigate({ to: '/sessions/$sessionId', params: { sessionId: updatedId }, replace: true, ...PRESERVE_SESSION_SIDEBAR_SCROLL })
+                    return
+                }
+            }
+            await Promise.all([refetchSession(), refetchMessages()])
+        })()
+        historyRefreshInFlight.current = { sessionId, promise }
+        void promise.finally(() => {
+            if (historyRefreshInFlight.current?.promise === promise) historyRefreshInFlight.current = null
+        }).catch(() => {})
+        return promise
+    }, [api, sessionId, historyReadOnly, selectedHistoryAgent, selectedHistorySourceId, historyMachineId, refetchMessages, refetchSession, navigate, queryClient])
+
+    useEffect(() => {
+        if (!historyReadOnly) return
+        const refresh = () => {
+            if (document.visibilityState !== 'hidden' && navigator.onLine) void refreshSelectedSession().catch(() => {})
+        }
+        refresh()
+        const timer = window.setInterval(refresh, 15_000)
+        window.addEventListener('online', refresh)
+        document.addEventListener('visibilitychange', refresh)
+        return () => {
+            window.clearInterval(timer)
+            window.removeEventListener('online', refresh)
+            document.removeEventListener('visibilitychange', refresh)
+        }
+    }, [historyReadOnly, refreshSelectedSession])
 
     const handleInitialOutlineConsumed = useCallback(() => {
         navigate({
@@ -813,6 +861,7 @@ function SessionPage() {
             onRetryMessage={retryMessage}
             autocompleteSuggestions={getAutocompleteSuggestions}
             availableSlashCommands={slashCommands}
+            phoneGatewayEnabled={phoneGatewayEnabled}
             sendError={sendError}
             onClearSendError={clearSendError}
             onSuppressSendErrorRestore={suppressSendErrorRestore}
@@ -896,7 +945,7 @@ function SessionDetailRoute() {
 }
 
 function NewSessionPage() {
-    const { api } = useAppContext()
+    const { api, phoneGatewayEnabled } = useAppContext()
     const navigate = useNavigate()
     const goBack = useAppGoBack()
     const queryClient = useQueryClient()
@@ -966,13 +1015,18 @@ function NewSessionPage() {
                 className="app-scroll-y flex-1 min-h-0"
                 style={{ paddingBottom: 'calc(var(--app-floating-bottom-offset, 0px) + env(safe-area-inset-bottom))' }}
             >
-                {machinesError ? (
+                {machinesError && !phoneGatewayEnabled ? (
                     <div className="p-3 text-sm text-red-600">
                         {machinesError}
                     </div>
                 ) : null}
 
-                <NewSession
+                {phoneGatewayEnabled ? <PhoneGatewayNewSession
+                    api={api}
+                    onCancel={handleCancel}
+                    onSuccess={handleSuccess}
+                    initialDirectory={initialDirectory}
+                /> : <NewSession
                     api={api}
                     machines={machines}
                     isLoading={machinesLoading}
@@ -981,7 +1035,7 @@ function NewSessionPage() {
                     onChooseFolder={handleChooseFolder}
                     initialDirectory={initialDirectory}
                     initialMachineId={initialMachineId}
-                />
+                />}
             </div>
         </div>
     )

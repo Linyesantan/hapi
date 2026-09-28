@@ -198,7 +198,9 @@ function handleResponse(
         // error event to the user on every completed turn. compact/set_model
         // are owned by the awaited slash-command/config handlers, which report
         // their own formatted failure message.
-        if (!['get_session_stats', 'steer', 'compact', 'set_model'].includes(command)) {
+        const unsupportedHistoryProbe = ['get_entries', 'get_fork_messages'].includes(command)
+            && /unknown command/i.test(error);
+        if (!unsupportedHistoryProbe && !['get_session_stats', 'steer', 'compact', 'set_model'].includes(command)) {
             session.sendSessionEvent({ type: 'message', message: error });
         }
         if (command === 'prompt' && pendingLocalIds.length > 0) {

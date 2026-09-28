@@ -21,12 +21,17 @@ import { createSessionsRoutes } from './routes/sessions'
 import { createMessagesRoutes } from './routes/messages'
 import { createPermissionsRoutes } from './routes/permissions'
 import { createMachinesRoutes } from './routes/machines'
+import { createPhoneGatewayRoutes, phoneGatewayEnabled } from './routes/phoneGateway'
+import { createPhoneActivityRoutes } from './routes/phoneActivity'
+import { phoneCurfewState, phoneCurfewMiddleware } from './phoneCurfew'
 import { createStorageRoutes } from './routes/storage'
 import { createUsageRoutes } from './routes/usage'
 import { createGitRoutes } from './routes/git'
 import { createCliRoutes } from './routes/cli'
 import { createCodexDesktopRoutes } from './routes/codexDesktop'
 import { createPiSessionRoutes } from './routes/piSessions'
+import { createOpencodeSessionRoutes } from './routes/opencodeSessions'
+import { createDshWebRoutes } from './routes/dshWeb'
 import { createPushRoutes } from './routes/push'
 import { createDevicesRoutes } from './routes/devices'
 import { createVoiceRoutes } from './routes/voice'
@@ -254,7 +259,8 @@ function createWebApp(options: {
         protocolVersion: PROTOCOL_VERSION,
         capabilities: {
             workGraph: true,
-            titleSuggestion: readTitleProviderConfig() !== null
+            titleSuggestion: readTitleProviderConfig() !== null,
+            phoneGateway: phoneGatewayEnabled()
         }
     }))
 
@@ -281,15 +287,22 @@ function createWebApp(options: {
 
     app.route('/cli', createCliRoutes(options.getSyncEngine))
 
+    app.get('/api/phone-gateway/access', c => c.json(phoneCurfewState()))
+
     app.route('/api', createAuthRoutes(options.jwtSecret, options.store))
     app.route('/api', createBindRoutes(options.jwtSecret, options.store))
 
     app.use('/api/*', createAuthMiddleware(options.jwtSecret))
+    // DSH web 跳转不属于手机网关操作，注册在宵禁中间件之前以便宵禁期间仍可打开。
+    app.route('/api', createDshWebRoutes(configuration.dataDir))
+    app.use('/api/*', phoneCurfewMiddleware())
     app.route('/api', createEventsRoutes(options.getSseManager, options.getSyncEngine, options.getVisibilityTracker))
     app.route('/api', createSessionsRoutes(options.getSyncEngine))
     app.route('/api', createMessagesRoutes(options.getSyncEngine))
     app.route('/api', createPermissionsRoutes(options.getSyncEngine))
     app.route('/api', createMachinesRoutes(options.getSyncEngine))
+    app.route('/api', createPhoneGatewayRoutes())
+    app.route('/api', createPhoneActivityRoutes(options.getSyncEngine))
     app.route('/api', createStorageRoutes(configuration.dbPath))
     app.route('/api', createHubSettingsRoutes(configuration.dataDir))
     app.route('/api', createUsageRoutes(options.store))
@@ -303,6 +316,7 @@ function createWebApp(options: {
         store: options.store,
         getSyncEngine: options.getSyncEngine
     }))
+    app.route('/api', createOpencodeSessionRoutes({ store: options.store, getSyncEngine: options.getSyncEngine }))
     app.route('/api', createPushRoutes(options.store, options.vapidPublicKey))
     app.route('/api', createDevicesRoutes(options.store))
     app.route('/api', createVoiceRoutes({ dataDir: configuration.dataDir }))
@@ -446,6 +460,7 @@ export async function startWebServer(options: {
     const originalWsHandler = socketHandler.websocket
     const geminiProxyHandler = createGeminiProxyWebSocketHandler()
     const qwenProxyHandler = createQwenProxyWebSocketHandler()
+    const voiceCurfewTimers = new WeakMap<object, ReturnType<typeof setTimeout>>()
 
     // eslint-disable-next-line @typescript-eslint/no-explicit-any
     const server = (Bun.serve as any)({
@@ -463,6 +478,11 @@ export async function startWebServer(options: {
             open(ws: unknown) {
                 applyDefaultWsCompression(ws as ServerWebSocket<unknown>)
                 const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>
+                if (wsAny.data?._geminiProxy || wsAny.data?._qwenProxy) {
+                    const access = phoneCurfewState()
+                    if (access.restricted) { wsAny.close(1008, 'SSH curfew'); return }
+                    if (access.enabled) voiceCurfewTimers.set(wsAny, setTimeout(() => wsAny.close(1008, 'SSH curfew'), Math.max(0, access.nextChangeAt - Date.now())))
+                }
                 if (wsAny.data?._geminiProxy) {
                     geminiProxyHandler.open(wsAny)
                 } else if (wsAny.data?._qwenProxy) {
@@ -473,6 +493,7 @@ export async function startWebServer(options: {
             },
             message(ws: unknown, message: unknown) {
                 const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>
+                if ((wsAny.data?._geminiProxy || wsAny.data?._qwenProxy) && phoneCurfewState().restricted) { wsAny.close(1008, 'SSH curfew'); return }
                 if (wsAny.data?._geminiProxy) {
                     geminiProxyHandler.message(wsAny, message as string)
                 } else if (wsAny.data?._qwenProxy) {
@@ -483,6 +504,8 @@ export async function startWebServer(options: {
             },
             close(ws: unknown, code: number, reason: string) {
                 const wsAny = ws as ServerWebSocket<{ _qwenProxy?: boolean; _geminiProxy?: boolean }>
+                clearTimeout(voiceCurfewTimers.get(wsAny))
+                voiceCurfewTimers.delete(wsAny)
                 if (wsAny.data?._geminiProxy) {
                     geminiProxyHandler.close(wsAny, code, reason)
                 } else if (wsAny.data?._qwenProxy) {
@@ -494,6 +517,10 @@ export async function startWebServer(options: {
         },
         fetch: async (req: Request, server: { upgrade: (req: Request, opts?: unknown) => boolean }) => {
             const url = new URL(req.url)
+            if (url.pathname.startsWith('/api/') && !url.pathname.startsWith('/api/dsh-web/') && url.pathname !== '/api/phone-gateway/access' && phoneCurfewState().restricted) {
+                const access = phoneCurfewState()
+                return Response.json({ error: access.message, code: 'ssh_curfew', nextChangeAt: access.nextChangeAt }, { status: 423 })
+            }
             if (url.pathname.startsWith('/socket.io/')) {
                 return socketHandler.fetch(req, server as never)
             }

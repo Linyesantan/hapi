@@ -1,6 +1,6 @@
 import { describe, it, expect, vi, beforeEach } from 'vitest'
 import { renderHook, act, waitFor } from '@testing-library/react'
-import { QueryClient, QueryClientProvider } from '@tanstack/react-query'
+import { QueryClient, QueryClientProvider, onlineManager } from '@tanstack/react-query'
 import type { ReactNode } from 'react'
 import { useSendMessage, type SendMessageAcceptance } from './useSendMessage'
 import { ApiError, type ApiClient } from '@/api/client'
@@ -183,6 +183,30 @@ describe('useSendMessage', () => {
         })
 
         expect(onSuccess).not.toHaveBeenCalled()
+    })
+
+    it('restores offline input immediately and never auto-sends it on reconnect', async () => {
+        const online = vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
+        onlineManager.setOnline(false)
+        const send = vi.fn(async () => {})
+        const onError = vi.fn()
+        try {
+            const { result, unmount } = renderHook(
+                () => useSendMessage(createMockApi(send), 'session-A', { onError }),
+                { wrapper: createWrapper() },
+            )
+            await act(async () => { await result.current.sendMessage('保留中文草稿') })
+            await waitFor(() => expect(onError).toHaveBeenCalledWith(expect.objectContaining({
+                sessionId: 'session-A', text: '保留中文草稿', error: expect.any(TypeError),
+            })))
+            expect(result.current.isSending).toBe(false)
+            await act(async () => { onlineManager.setOnline(true) })
+            expect(send).not.toHaveBeenCalled()
+            unmount()
+        } finally {
+            online.mockRestore()
+            onlineManager.setOnline(true)
+        }
     })
 
     // assistant-ui clears the composer eagerly when send is invoked, so to

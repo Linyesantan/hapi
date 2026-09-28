@@ -100,6 +100,36 @@ describe('Pi session import', () => {
         return { store, engine, events }
     }
 
+    it('creates an isolated read-only mirror and never updates the controllable Pi record', () => {
+        const { store, engine } = setup()
+        const source = transcript('native-readonly', [userMessage('native-readonly', 'entry-1', null, '原终端中文内容', 1_000)])
+        const options = { store, engine, namespace: 'default', machine: machine('pc'), transcript: source }
+        const executable = importPiSession(options)
+        const before = store.sessions.getSession(executable.hapiSessionId!)
+        const readonly = importPiSession({ ...options, readOnly: true })
+        expect(readonly.hapiSessionId).not.toBe(executable.hapiSessionId)
+        expect(store.sessions.getSession(readonly.hapiSessionId!)?.metadata).toMatchObject({ historyReadOnly: true })
+        const messageIds = store.messages.getAllMessages(readonly.hapiSessionId!).map(message => message.id)
+        expect(importPiSession({ ...options, readOnly: true })).toMatchObject({ hapiSessionId: readonly.hapiSessionId, action: 'unchanged' })
+        expect(store.messages.getAllMessages(readonly.hapiSessionId!).map(message => message.id)).toEqual(messageIds)
+        expect(store.sessions.getSession(executable.hapiSessionId!)).toEqual(before)
+        expect(importPiSession({ ...options, readOnly: true, existingSession: before })).toMatchObject({ error: { code: 'history_mode_conflict' } })
+    })
+
+    it('follows native Pi branch changes only inside a read-only mirror', () => {
+        const { store, engine } = setup()
+        const first = userMessage('pi-branch', 'first', null, '相同开头', 1000)
+        const source = transcript('pi-branch', [first, userMessage('pi-branch', 'old', 'first', '旧分支', 2000)])
+        const options = { store, engine, namespace: 'default', machine: machine('pc'), transcript: source, readOnly: true }
+        const imported = importPiSession(options)
+        const firstId = store.messages.getAllMessages(imported.hapiSessionId!)[0].id
+        const next = { ...options, transcript: transcript('pi-branch', [first, userMessage('pi-branch', 'new', 'first', '新分支', 3000)]) }
+        expect(importPiSession(next)).toMatchObject({ hapiSessionId: imported.hapiSessionId, action: 'updated' })
+        expect(store.messages.getAllMessages(imported.hapiSessionId!)).toHaveLength(2)
+        expect(store.messages.getAllMessages(imported.hapiSessionId!)[0].id).toBe(firstId)
+        expect(importPiSession(next)).toMatchObject({ action: 'unchanged' })
+    })
+
     it('loads imported sessions once when listing multiple Pi summaries', async () => {
         const { store } = setup()
         const selectedMachine = machine('machine-1')

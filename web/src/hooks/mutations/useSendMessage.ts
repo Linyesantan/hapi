@@ -212,9 +212,15 @@ export function useSendMessage(
     isSessionThinkingRef.current = options?.isSessionThinking ?? false
 
     const mutation = useMutation({
+        // Fail offline sends through the existing draft-restoration path instead
+        // of leaving cleared composer text in an in-memory paused mutation.
+        networkMode: 'always',
         mutationFn: async (input: SendMessageInput) => {
             if (!api) {
                 throw new Error('API unavailable')
+            }
+            if (typeof navigator !== 'undefined' && navigator.onLine === false) {
+                throw new TypeError('当前离线，输入已保留；联网后再发送。')
             }
             await api.sendMessage(
                 input.sessionId,

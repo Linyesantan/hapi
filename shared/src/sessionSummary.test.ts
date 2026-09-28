@@ -33,6 +33,16 @@ function makeSession(overrides: Partial<Session> = {}): Session {
 }
 
 describe('getPendingRequestKinds', () => {
+    it('列表摘要保留 Codex 历史只读标记与原生 ID', () => {
+        expect(toSessionSummaryMetadata({ path: '/work', host: 'pc', flavor: 'codex', codexSessionId: 'original', codexHistoryReadOnly: true }))
+            .toMatchObject({ agentSessionId: 'original', codexHistoryReadOnly: true })
+    })
+    it('列表摘要保留其它终端的只读标记和原终端状态', () => {
+        for (const flavor of ['opencode', 'pi'] as const) {
+            expect(toSessionSummaryMetadata({ path: '/work', host: 'pc', flavor, [`${flavor}SessionId`]: 'native', historyReadOnly: true, historySourceState: { state: 'running', checkedAt: 1234 } }))
+                .toMatchObject({ agentSessionId: 'native', historyReadOnly: true, historySourceState: { state: 'running', checkedAt: 1234 } })
+        }
+    })
     it('classifies ask-user tools as input', () => {
         const kinds = getPendingRequestKinds(makeSession({
             agentState: {

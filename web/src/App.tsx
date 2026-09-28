@@ -24,13 +24,14 @@ import { useTranslation } from '@/lib/use-translation'
 import { translateInputRequestTitle } from '@/lib/input-request-toast'
 import { VoiceProvider } from '@/lib/voice-context'
 import { requireHubUrlForLogin } from '@/lib/runtime-config'
-import { getAppGlobalSseSubscription, getAppSessionSseSubscription } from '@/lib/appSseSubscriptions'
+import { getAppSseSubscription } from '@/lib/appSseSubscriptions'
 import { canUseAppBadging, useAppBadge } from '@/hooks/useAppBadge'
 import { useAppBadgePreference } from '@/hooks/useAppBadgePreference'
 import { reconcileQueuedStateAfterConnect } from '@/lib/queued-state-reconciliation'
 import { LoginPrompt } from '@/components/LoginPrompt'
 import { InstallPrompt } from '@/components/InstallPrompt'
 import { OfflineBanner } from '@/components/OfflineBanner'
+import { PhoneCurfewBanner, usePhoneCurfew } from '@/components/PhoneCurfewBanner'
 import { PwaUpdateBanner, PwaUpdateBannerWithStatusOffset } from '@/components/PwaUpdateBanner'
 import { SyncingBanner } from '@/components/SyncingBanner'
 import { ReconnectingBanner } from '@/components/ReconnectingBanner'
@@ -71,6 +72,8 @@ function AppInner() {
     const { authSource, isLoading: isAuthSourceLoading, setAccessToken } = useAuthSource(baseUrl)
     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
     const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
+    const [phoneGatewayEnabled, setPhoneGatewayEnabled] = useState(false)
+    const phoneCurfew = usePhoneCurfew(phoneGatewayEnabled)
     const goBack = useAppGoBack()
     const pathname = useLocation({ select: (location) => location.pathname })
     const matchRoute = useMatchRoute()
@@ -80,12 +83,14 @@ function AppInner() {
     useEffect(() => {
         let cancelled = false
         setTitleSuggestionAvailable(false)
+        setPhoneGatewayEnabled(false)
         if (!api) return () => { cancelled = true }
 
         void api.getHealth()
             .then((health) => {
                 if (!cancelled) {
                     setTitleSuggestionAvailable(health.capabilities?.titleSuggestion === true)
+                    setPhoneGatewayEnabled(health.capabilities?.phoneGateway === true)
                 }
             })
             .catch(() => {
@@ -251,6 +256,11 @@ function AppInner() {
     const handleSseConnect = useCallback((info: { resumed: boolean }) => {
         // Clear disconnected state on successful connection
         reportSseConnect()
+        if (!info.resumed && api && selectedSessionId) {
+            void reconcileQueuedStateAfterConnect(api, selectedSessionId).catch((error) => {
+                console.error('Failed to reconcile queued state after SSE connect:', error)
+            })
+        }
 
         // The hub replayed every event missed during the gap, so the caches
         // are already consistent - the full refetch below would only re-download
@@ -319,20 +329,6 @@ function AppInner() {
         void syncTailMessages(api, event.sessionId)
     }, [api, selectedSessionId])
 
-    const handleSessionSseConnect = useCallback((info: { resumed: boolean }) => {
-        if (!api || !selectedSessionId) {
-            return
-        }
-        // A resumed connection replayed messages-consumed/message events for
-        // this session, so the queued-state snapshot cannot have drifted.
-        if (info.resumed) {
-            return
-        }
-        void reconcileQueuedStateAfterConnect(api, selectedSessionId).catch((error) => {
-            console.error('Failed to reconcile queued state after SSE connect:', error)
-        })
-    }, [api, selectedSessionId])
-
     const translateIncomingToast = useCallback((title: string, body: string): { title: string; body: string } => {
         const normalizedTitle = title.trim()
         const normalizedBody = body.trim()
@@ -391,46 +387,29 @@ function AppInner() {
         })
     }, [addToast, translateIncomingToast])
 
-    const globalEventSubscription = useMemo(() => getAppGlobalSseSubscription(), [])
-    const sessionEventSubscription = useMemo(
-        () => getAppSessionSseSubscription(selectedSessionId),
+    const eventSubscription = useMemo(
+        () => getAppSseSubscription(selectedSessionId),
         [selectedSessionId]
     )
-    const sseEnabled = Boolean(api && token)
-    const showReconnectingBanner = sseDisconnected && !isSyncing
+    const sseEnabled = Boolean(api && token) && !phoneCurfew.restricted
+    const showReconnectingBanner = sseDisconnected && !isSyncing && !phoneCurfew.restricted
 
     const { subscriptionId: globalSubscriptionId } = useSSE({
         enabled: sseEnabled,
         token: token ?? '',
         baseUrl,
-        subscription: globalEventSubscription,
-        scope: 'global',
+        subscription: eventSubscription,
+        scope: 'app',
         onConnect: handleSseConnect,
         onDisconnect: handleSseDisconnect,
-        onEvent: () => {},
+        onEvent: handleSseEvent,
         onToast: handleToast
-    })
-
-    const { subscriptionId: sessionSubscriptionId } = useSSE({
-        enabled: sseEnabled && Boolean(sessionEventSubscription),
-        token: token ?? '',
-        baseUrl,
-        subscription: sessionEventSubscription ?? undefined,
-        scope: 'full',
-        onConnect: handleSessionSseConnect,
-        onEvent: handleSseEvent
     })
 
     useVisibilityReporter({
         api,
         subscriptionId: globalSubscriptionId,
         enabled: sseEnabled
-    })
-
-    useVisibilityReporter({
-        api,
-        subscriptionId: sessionSubscriptionId,
-        enabled: sseEnabled && Boolean(sessionEventSubscription)
     })
 
     // Loading auth source
@@ -512,7 +491,7 @@ function AppInner() {
     }
 
     return (
-        <AppContextProvider value={{ api, token, baseUrl, titleSuggestionAvailable }}>
+        <AppContextProvider value={{ api, token, baseUrl, titleSuggestionAvailable, phoneGatewayEnabled }}>
             <VoiceProvider>
                 <PwaUpdateBannerWithStatusOffset
                     isSyncing={isSyncing}
@@ -524,13 +503,17 @@ function AppInner() {
                     reason={sseDisconnectReason}
                 />
                 <VoiceErrorBanner />
-                <OfflineBanner
-                    isHubConnected={globalSubscriptionId !== null}
-                    isReconnecting={showReconnectingBanner}
-                />
                 <RunnerVersionSkewBanner />
                 <div className="h-full min-h-0 flex flex-col">
-                    <Outlet />
+                    <PhoneCurfewBanner {...phoneCurfew} />
+                    <OfflineBanner
+                        cache={api.offlineCache}
+                        isHubConnected={globalSubscriptionId !== null}
+                        isReconnecting={showReconnectingBanner}
+                    />
+                    <div className="min-h-0 flex-1">
+                        <Outlet />
+                    </div>
                 </div>
                 <ToastContainer />
                 <InstallPrompt />

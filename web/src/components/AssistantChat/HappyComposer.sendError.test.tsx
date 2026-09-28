@@ -40,6 +40,7 @@ vi.mock('@assistant-ui/react', async () => {
     return {
         useAui: () => ({
             composer: () => ({
+                getState: () => runtime.snapshot.composer,
                 setText: (text: string) => {
                     runtime.setSnapshot!((current) => ({
                         ...current,
@@ -124,7 +125,7 @@ vi.mock('@/components/AssistantChat/ComposerButtons', () => ({
         onModelValueToggle?: () => void
     }) => (
         <div>
-            <button type="button" onClick={props.onSend}>send</button>
+            <button type="button" onClick={() => props.onSend()}>send</button>
             <button type="button" onClick={props.onExpandedToggle}>
                 {props.expanded ? 'collapse' : 'expand'}
             </button>
@@ -158,6 +159,7 @@ function ComposerHarness(props: {
     initialSchedule?: PendingSchedule | null
     piRunning?: boolean
     controls: { current: HarnessControls | null }
+    overrides?: Partial<Parameters<typeof HappyComposer>[0]>
 }) {
     const [snapshot, setSnapshot] = useState<FakeRuntimeState>(() => ({
         composer: { text: props.initialText, attachments: [] },
@@ -246,6 +248,7 @@ function ComposerHarness(props: {
                 piModels={[{ provider: 'pi', modelId: 'pi-model', name: 'Pi model' }]}
                 onModelChange={(model) => runtime.modelChanges.push(model)}
                 pendingSendIntentRef={pendingSendIntentRef}
+                {...props.overrides}
             />
         </I18nProvider>
     )
@@ -515,6 +518,15 @@ describe('HappyComposer send-error atomic restore', () => {
         expect(screen.getByTestId('pending-schedule')).toHaveTextContent('null')
     })
 
+    it('keeps a rejection visible when the native send has retained the text and attachments', async () => {
+        const controls = renderComposer('保留原终端草稿', null)
+        act(() => controls.current!.addAttachment())
+        setError(controls, { ...fail(1, '保留原终端草稿', null), restoreSuppressed: true })
+        await waitFor(() => expect(screen.getByTestId('composer-send-error')).toHaveTextContent('failed-1'))
+        expect(input()).toHaveValue('保留原终端草稿')
+        expect(controls.current!.getClearErrorCalls()).toBe(0)
+    })
+
     it('does not restore after the user selects then clears a new schedule', async () => {
         const controls = renderComposer()
         send()
@@ -600,5 +612,41 @@ describe('HappyComposer send intent gestures', () => {
         fireEvent.keyDown(input(), { key: 'Enter', altKey: true })
         expect(runtime.sentIntents).toEqual([])
         expect(runtime.pendingSendIntentRef?.current).toBe('default')
+    })
+})
+
+describe('模型斜杠命令', () => {
+    afterEach(() => { cleanup(); runtime.setSnapshot = null; runtime.sentIntents = [] })
+    it.each(['codex', 'opencode', 'pi'])('%s 输入 /model 并确认后打开选择器，不发送聊天消息', async agentFlavor => {
+        const controls = { current: null as HarnessControls | null }
+        const onModelChange = vi.fn()
+        render(<ComposerHarness initialText="/model" controls={controls} overrides={{ agentFlavor, onModelChange,
+            availableModelOptions: [{ value: 'test-model', label: 'Test model' }] }} />)
+        expect(screen.queryByRole('dialog', { name: '模型选择' })).toBeNull()
+        fireEvent.click(screen.getByRole('button', { name: 'send' }))
+        expect(screen.getByRole('dialog', { name: '模型选择' })).toBeTruthy()
+        expect(runtime.sentIntents).toEqual([])
+        expect(input()).toHaveValue('')
+        const picker = screen.getByRole('dialog', { name: '模型选择' })
+        fireEvent.click(picker.querySelector('button')!)
+        expect(onModelChange).toHaveBeenCalledTimes(1)
+    })
+    it('原生 /models 打开原终端菜单，同时保留附件和定时设置', () => {
+        const controls = { current: null as HarnessControls | null }
+        const open = vi.fn()
+        render(<ComposerHarness initialText="/models" initialSchedule={{ type: 'absolute', ms: 1234 }} controls={controls}
+            overrides={{ agentFlavor: 'opencode', nativeTerminalInput: true, onOpenNativeModelMenu: open }} />)
+        act(() => controls.current!.addAttachment())
+        fireEvent.click(screen.getByRole('button', { name: 'send' }))
+        expect(open).toHaveBeenCalledTimes(1)
+        expect(runtime.sentIntents).toEqual([])
+        expect(runtime.snapshot.composer.attachments).toHaveLength(1)
+        expect(screen.getByTestId('pending-schedule')).toHaveTextContent('1234')
+    })
+    it('带参数的 /model 继续交给命令处理器，普通文字不触发选择器', () => {
+        renderComposer('/model test-model', null)
+        fireEvent.click(screen.getByRole('button', { name: 'send' }))
+        expect(runtime.sentIntents).toEqual(['default'])
+        expect(screen.queryByRole('dialog', { name: '模型选择' })).toBeNull()
     })
 })

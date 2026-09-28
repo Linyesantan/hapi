@@ -9,6 +9,7 @@ import type { VisibilityTracker } from '../../visibility/visibilityTracker'
 import type { WebAppEnv } from '../middleware/auth'
 import { compressSseResponse } from '../sseCompression'
 import { requireSession } from './guards'
+import { phoneCurfewState } from '../phoneCurfew'
 
 function parseOptionalId(value: string | undefined): string | null {
     if (!value) {
@@ -48,6 +49,7 @@ export function createEventsRoutes(
 
         const query = c.req.query()
         const all = parseBoolean(query.all)
+        const selectedMessagesOnly = parseBoolean(query.selectedMessagesOnly)
         const sessionId = parseOptionalId(query.sessionId)
         const machineId = parseOptionalId(query.machineId)
         const subscriptionId = randomUUID()
@@ -92,11 +94,12 @@ export function createEventsRoutes(
                 id: subscriptionId,
                 namespace,
                 all,
+                selectedMessagesOnly,
                 sessionId: resolvedSessionId,
                 machineId,
                 visibility,
                 resumeFrom,
-                send: (event, eventId) => stream.writeSSE({ data: JSON.stringify(event), id: eventId }),
+                send: (event, eventId) => phoneCurfewState().restricted ? Promise.resolve() : stream.writeSSE({ data: JSON.stringify(event), id: eventId }),
                 sendHeartbeat: async () => {
                     await stream.writeSSE({
                         data: JSON.stringify({
@@ -131,9 +134,12 @@ export function createEventsRoutes(
                 await manager.drainPending(subscriptionId)
 
                 await new Promise<void>((resolve) => {
-                    const done = () => resolve()
+                    let timer: ReturnType<typeof setTimeout> | undefined
+                    const done = () => { clearTimeout(timer); resolve() }
                     c.req.raw.signal.addEventListener('abort', done, { once: true })
                     stream.onAbort(done)
+                    const access = phoneCurfewState()
+                    if (access.enabled) timer = setTimeout(done, Math.max(0, access.nextChangeAt - Date.now()))
                 })
             } finally {
                 manager.unsubscribe(subscriptionId)

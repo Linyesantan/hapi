@@ -63,6 +63,34 @@ describe('listLocalCodexSessionSummaries', () => {
         else process.env.CODEX_HOME = originalCodexHome
     })
 
+    it('keeps analysis and published reasoning in Thinking, separate from final answers', () => {
+        const root = mkdtempSync(join(tmpdir(), 'codex-thinking-'))
+        process.env.CODEX_HOME = root
+        const directory = join(root, 'sessions')
+        mkdirSync(directory)
+        const records = [
+            { type: 'session_meta', payload: { id: 'thinking-session', cwd: '/tmp/project' } },
+            { type: 'response_item', payload: { type: 'message', role: 'user', content: [{ type: 'input_text', text: '中文问题' }] } },
+            { type: 'response_item', payload: { type: 'message', role: 'assistant', channel: 'analysis', content: [{ type: 'output_text', text: '分析示例' }] } },
+            { type: 'response_item', payload: { type: 'message', role: 'assistant', channel: 'final', content: [{ type: 'output_text', text: '正式回答' }] } },
+            { type: 'event_msg', payload: { type: 'agent_message', phase: 'commentary', message: '可见执行过程' } },
+            { type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'commentary', content: [{ type: 'output_text', text: '可见执行过程' }] } },
+            { type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '最终答复' }] } },
+            { type: 'event_msg', payload: { type: 'agent_reasoning', text: '思考摘要' } },
+            { type: 'response_item', payload: { type: 'reasoning', summary: [{ type: 'summary_text', text: '另一段摘要' }], encrypted_content: 'opaque' } }
+        ]
+        const file = join(directory, 'thinking.jsonl')
+        const content = records.map(record => JSON.stringify(record)).join('\n')
+        writeFileSync(file, content)
+        try {
+            const session = listLocalCodexSessionsWithMessagesByIds(new Set(['thinking-session']))[0]
+            expect(session.messages.filter(message => message.role === 'agent').map(message => (message.content as { data: { type: string } }).data.type))
+                .toEqual(['reasoning', 'message', 'reasoning', 'message', 'reasoning', 'reasoning'])
+            expect(JSON.stringify(session.messages)).not.toContain('opaque')
+            expect(readFileSync(file, 'utf8')).toBe(content)
+        } finally { rmSync(root, { recursive: true, force: true }) }
+    })
+
     it('parses original and fork metadata from session_meta', () => {
         const root = mkdtempSync(join(tmpdir(), 'codex-home-'))
         process.env.CODEX_HOME = root

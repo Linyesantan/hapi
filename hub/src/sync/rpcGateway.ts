@@ -5,7 +5,9 @@ import {
     AgentAvailabilityResponseSchema,
     CursorChatStoreStatusSchema,
     ListCodexSessionsRpcResponseSchema,
-    ListPiSessionsRpcResponseSchema
+    NativeCodexTerminalResponseSchema,
+    ListPiSessionsRpcResponseSchema,
+    ListOpencodeSessionsRpcResponseSchema
 } from '@hapi/protocol/apiTypes'
 import type {
     AgyModelsResponse,
@@ -28,6 +30,7 @@ import type {
     ListDirectoryResponse,
     ListCodexSessionsRpcResponse,
     ListPiSessionsRpcResponse,
+    ListOpencodeSessionsRpcResponse,
     ArchiveCodexSessionRpcResponse,
     OpencodeModelsResponse,
     OpencodeModelSummary,
@@ -105,6 +108,7 @@ export type RpcCodexModel = CodexModelSummary
 export type RpcListCodexModelsResponse = CodexModelsResponse
 export type RpcListCodexSessionsResponse = ListCodexSessionsRpcResponse
 export type RpcListPiSessionsResponse = ListPiSessionsRpcResponse
+export type RpcListOpencodeSessionsResponse = ListOpencodeSessionsRpcResponse
 export type RpcArchiveCodexSessionResponse = ArchiveCodexSessionRpcResponse
 export type RpcCursorModel = CursorModelSummary
 export type RpcListCursorModelsResponse = CursorModelsResponse
@@ -459,9 +463,47 @@ export class RpcGateway {
         return ListCodexSessionsRpcResponseSchema.parse(result)
     }
 
+    async readNativeCodexTerminal(machineId: string, sessionId: string) {
+        return NativeCodexTerminalResponseSchema.parse(await this.machineRpc(
+            machineId, RPC_METHODS.ReadNativeCodexTerminal, { sessionId }, 5_000
+        ))
+    }
+
+    async readNativeTerminal(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalRequest) {
+        return NativeCodexTerminalResponseSchema.parse(await this.machineRpc(machineId, RPC_METHODS.ReadNativeTerminal, request, 8_000))
+    }
+
+    async sendNativeTerminalInput(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalSendRequest) {
+        const { NativeTerminalSendResponseSchema } = await import('@hapi/protocol/apiTypes')
+        return NativeTerminalSendResponseSchema.parse(await this.machineRpc(machineId, RPC_METHODS.SendNativeTerminalInput, request, 15_000))
+    }
+
+    async controlNativeModelMenu(machineId: string, request: import('@hapi/protocol/apiTypes').NativeModelRequest) {
+        const { NativeModelResponseSchema } = await import('@hapi/protocol/apiTypes')
+        return NativeModelResponseSchema.parse(await this.machineRpc(machineId, RPC_METHODS.ControlNativeModelMenu, request, 15_000))
+    }
+
+    async controlNativeTerminal(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalControlRequest) {
+        const { NativeTerminalControlResponseSchema } = await import('@hapi/protocol/apiTypes')
+        return NativeTerminalControlResponseSchema.parse(await this.machineRpc(machineId, RPC_METHODS.ControlNativeTerminal, request, 15_000))
+    }
+
+    async uploadNativeTerminalFile(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalUploadRequest) {
+        return await this.machineRpc(machineId, RPC_METHODS.UploadNativeTerminalFile, request, 60_000) as RpcUploadFileResponse
+    }
+
+    async deleteNativeTerminalUpload(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalDeleteUploadRequest) {
+        return await this.machineRpc(machineId, RPC_METHODS.DeleteNativeTerminalUpload, request, 15_000) as RpcDeleteUploadResponse
+    }
+
     async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
         const result = await this.machineRpc(machineId, RPC_METHODS.ListPiSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
         return ListPiSessionsRpcResponseSchema.parse(result)
+    }
+
+    async listOpencodeSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListOpencodeSessionsResponse> {
+        const result = await this.machineRpc(machineId, RPC_METHODS.ListOpencodeSessions, { cwd: cwd ?? null, sessionIds }, MODEL_LIST_RPC_TIMEOUT_MS)
+        return ListOpencodeSessionsRpcResponseSchema.parse(result)
     }
 
     async archiveCodexSessionForMachine(machineId: string, sessionId: string): Promise<RpcArchiveCodexSessionResponse> {

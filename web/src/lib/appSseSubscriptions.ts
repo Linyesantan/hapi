@@ -1,20 +1,15 @@
-export type AppGlobalSseSubscription = {
+export type AppSseSubscription = {
     all: true
+    selectedMessagesOnly: true
+    sessionId?: string
 }
 
-export type AppSessionSseSubscription = {
-    sessionId: string
-}
-
-export function getAppGlobalSseSubscription(): AppGlobalSseSubscription {
-    return { all: true }
-}
-
-export function getAppSessionSseSubscription(
+export function getAppSseSubscription(
     selectedSessionId: string | null | undefined
-): AppSessionSseSubscription | null {
-    if (!selectedSessionId) {
-        return null
+): AppSseSubscription {
+    return {
+        all: true,
+        selectedMessagesOnly: true,
+        ...(selectedSessionId ? { sessionId: selectedSessionId } : {})
     }
-    return { sessionId: selectedSessionId }
 }

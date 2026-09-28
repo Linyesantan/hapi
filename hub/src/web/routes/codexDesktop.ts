@@ -4,6 +4,8 @@ import { randomUUID } from 'node:crypto'
 import { dirname, isAbsolute, join, resolve } from 'node:path'
 import { homedir, hostname, platform } from 'node:os'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
+import type { HistorySourceState } from '@hapi/protocol/schemas'
 import type { CodexCollaborationMode } from '@hapi/protocol/types'
 import { Hono } from 'hono'
 import type { Machine, SyncEngine } from '../../sync/syncEngine'
@@ -63,6 +65,7 @@ type CodexLocalSessionSummary = {
     cwd?: string | null
     file: string
     modifiedAt: number
+    sourceState?: HistorySourceState
     originator?: string | null
     cliVersion?: string | null
 }
@@ -136,6 +139,7 @@ type SyncSessionRequestParseResult = {
     serviceTier?: string | null
     collaborationMode?: CodexCollaborationMode
     yolo?: boolean
+    readOnly?: boolean
     error?: string
 }
 
@@ -655,7 +659,7 @@ function convertCodexRecordToImportedMessage(record: Record<string, unknown>): C
 
         if (eventType === 'agent_message') {
             const message = asString(payload.message)
-            return message ? buildImportedAgentMessage({ type: 'message', message, id: randomUUID() }) : null
+            return message ? buildImportedAgentMessage({ type: ['analysis', 'commentary'].includes(String(payload.channel ?? payload.phase)) ? 'reasoning' : 'message', message, id: randomUUID() }) : null
         }
 
         if (eventType === 'agent_reasoning') {
@@ -666,6 +670,18 @@ function convertCodexRecordToImportedMessage(record: Record<string, unknown>): C
         if (eventType === 'agent_reasoning_delta') {
             const delta = asString(payload.delta) ?? asString(payload.text) ?? asString(payload.message)
             return delta ? buildImportedAgentMessage({ type: 'reasoning-delta', delta }) : null
+        }
+
+        if (eventType === 'task_complete' || eventType === 'task_failed') {
+            // Codex 0.5x records turn failures inside the task_complete
+            // payload (error.message) instead of a dedicated error event, so
+            // without this the TUI's "high demand" style notices never reach
+            // the imported phone chat.
+            const error = asRecord(payload.error)
+            const message = asString(error?.message) ?? asString(payload.error)
+            if (!message) return null
+            const kind = asString(error?.codex_error_info ?? payload.codex_error_info)
+            return buildImportedAgentMessage({ type: 'message', message: `⚠️ Codex 报错：${message}${kind && kind !== message ? `（${kind}）` : ''}`, id: randomUUID() })
         }
 
         if (eventType === 'token_count') {
@@ -692,9 +708,18 @@ function convertCodexRecordToImportedMessage(record: Record<string, unknown>): C
                 return shouldIgnoreInjectedResponseUserMessage(text) ? null : buildImportedUserMessage(text)
             }
             if (role === 'assistant') {
-                return buildImportedAgentMessage({ type: 'message', message: text, id: randomUUID() })
+                return buildImportedAgentMessage({ type: ['analysis', 'commentary'].includes(String(payload.channel ?? payload.phase)) ? 'reasoning' : 'message', message: text, id: randomUUID() })
             }
             return null
+        }
+
+        if (itemType === 'reasoning') {
+            const items = Array.isArray(payload.summary) ? payload.summary : Array.isArray(payload.content) ? payload.content : []
+            const message = items.map(item => {
+                const value = asRecord(item)
+                return typeof value?.text === 'string' ? value.text : ''
+            }).filter(Boolean).join('\n')
+            return message ? buildImportedAgentMessage({ type: 'reasoning', message, id: randomUUID() }) : null
         }
 
         if (itemType === 'function_call') {
@@ -1866,7 +1891,7 @@ function parseSyncSessionRequest(body: unknown): SyncSessionRequestParseResult {
         return { sessionIds: [] }
     }
 
-    const bodyRecord = body as { sessionIds?: unknown; cwd?: unknown; machineId?: unknown; model?: unknown; modelReasoningEffort?: unknown; serviceTier?: unknown; collaborationMode?: unknown; yolo?: unknown }
+    const bodyRecord = body as { sessionIds?: unknown; cwd?: unknown; machineId?: unknown; model?: unknown; modelReasoningEffort?: unknown; serviceTier?: unknown; collaborationMode?: unknown; yolo?: unknown; readOnly?: unknown }
     const rawSessionIds = bodyRecord.sessionIds
     if (!Array.isArray(rawSessionIds)) {
         return { sessionIds: [], error: 'Invalid sessionIds' }
@@ -1903,7 +1928,8 @@ function parseSyncSessionRequest(body: unknown): SyncSessionRequestParseResult {
         modelReasoningEffort: hasModelReasoningEffort ? (typeof bodyRecord.modelReasoningEffort === 'string' && bodyRecord.modelReasoningEffort.trim() ? bodyRecord.modelReasoningEffort.trim() : null) : undefined,
         serviceTier: hasServiceTier ? bodyRecord.serviceTier as 'fast' | 'standard' | null : undefined,
         collaborationMode: hasCollaborationMode ? bodyRecord.collaborationMode as CodexCollaborationMode : undefined,
-        yolo: bodyRecord.yolo === true
+        yolo: bodyRecord.yolo === true,
+        readOnly: bodyRecord.readOnly === true
     }
 }
 
@@ -1981,6 +2007,7 @@ function importSingleCodexSession(options: {
     modelReasoningEffort?: string | null
     yolo?: boolean
     machineId?: string | null
+    readOnly?: boolean
 }): ScriptLaunchResponse {
     const summary = options.localSessionsById.get(options.codexSessionId)
     if (!summary) {
@@ -2012,7 +2039,10 @@ function importSingleCodexSession(options: {
         .filter((value): value is string => value !== null)
 
     try {
+        // 只读镜像与可执行会话分别复用，刷新历史不能写入正在运行的 CLI 会话。
         const candidates = collectImportCandidates(options.store, options.namespace, options.getSyncEngine)
+        // 活跃守卫必须跑在只读/可执行分流之前：活跃会话不是只读镜像，
+        // 若先过滤掉，检查就永远不会触发，刷新会写进正在运行的 CLI 会话。
         const activeCandidate = candidates.find((candidate) => (
             candidate.active
             && getCodexImportIds(candidate.metadata).includes(options.codexSessionId)
@@ -2025,9 +2055,12 @@ function importSingleCodexSession(options: {
         if (activeCandidate) {
             throw new Error('Cannot sync Codex transcript while the matching HAPI session is active')
         }
+        // 只读镜像与可执行会话分别复用，互不串写。
+        const targetCandidates = candidates
+            .filter((candidate) => isReadOnlyHistory(candidate.metadata) === Boolean(options.readOnly))
         const target = selectImportTargetSession(
             options.store,
-            candidates,
+            targetCandidates,
             options.codexSessionId,
             importedComparableMessages,
             options.machineId
@@ -2040,6 +2073,11 @@ function importSingleCodexSession(options: {
             options.machineId ?? resolveImportMachineId(transcript.cwd, options.namespace, engine) ?? undefined,
             options.yolo ? 'yolo' : undefined
         )
+        if (options.readOnly) {
+            metadata.codexHistoryReadOnly = true
+            metadata.historyReadOnly = true
+            metadata.historySourceState = transcript.sourceState ?? { state: 'unknown', checkedAt: Date.now() }
+        }
 
         let sessionId = existingStored?.id ?? null
         let created = false
@@ -2145,6 +2183,7 @@ export async function importSelectedCodexSessions(options: {
     collaborationMode?: CodexCollaborationMode
     yolo?: boolean
     machineId?: string | null
+    readOnly?: boolean
 }): Promise<ScriptLaunchResponse> {
     const codexSessionIds = options.codexSessionIds
     if (codexSessionIds.length === 0) {
@@ -2163,7 +2202,8 @@ export async function importSelectedCodexSessions(options: {
             model: options.model,
             modelReasoningEffort: options.modelReasoningEffort,
             yolo: options.yolo,
-            machineId: options.machineId
+            machineId: options.machineId,
+            readOnly: options.readOnly
         })
         results.push(result)
 
@@ -2320,7 +2360,8 @@ export function createCodexDesktopRoutes(options: {
             modelReasoningEffort: parsed.modelReasoningEffort,
             serviceTier: parsed.serviceTier,
             collaborationMode: parsed.collaborationMode,
-            yolo: parsed.yolo
+            yolo: parsed.yolo,
+            readOnly: parsed.readOnly
         })
         return c.json({
             ...result,
