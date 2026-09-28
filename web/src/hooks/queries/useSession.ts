@@ -36,6 +36,7 @@ export function useSession(api: ApiClient | null, sessionId: string | null): {
             return await api.getSession(sessionId)
         },
         enabled: Boolean(api && sessionId),
+        networkMode: 'always', // the API also reads local IndexedDB while offline
         staleTime: SESSION_DETAIL_STALE_TIME_MS,
         retry: (failureCount, error) => {
             if (isSessionNotFoundError(error)) {

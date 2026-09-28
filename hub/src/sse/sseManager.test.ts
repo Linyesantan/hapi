@@ -4,6 +4,35 @@ import type { SyncEvent } from '../sync/syncEngine'
 import { VisibilityTracker } from '../visibility/visibilityTracker'
 
 describe('SSEManager namespace filtering', () => {
+    it('combines global state with only the selected transcript in one app connection', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: SyncEvent[] = []
+        manager.subscribe({
+            id: 'app', namespace: 'alpha', all: true, selectedMessagesOnly: true, sessionId: 'selected',
+            send: event => { received.push(event) }, sendHeartbeat: () => {}
+        })
+        const message = { id: 'm1', seq: 1, localId: null, content: {}, createdAt: 1 }
+        manager.broadcast({ type: 'message-received', namespace: 'alpha', sessionId: 'other', message })
+        manager.broadcast({ type: 'message-received', namespace: 'alpha', sessionId: 'selected', message })
+        manager.broadcast({ type: 'session-updated', namespace: 'alpha', sessionId: 'other' })
+        manager.broadcast({ type: 'messages-consumed', namespace: 'alpha', sessionId: 'other', localIds: ['m1'], invokedAt: 1 })
+        manager.broadcast({ type: 'message-received', namespace: 'beta', sessionId: 'selected', message })
+        expect(received.map(event => event.type)).toEqual(['message-received', 'session-updated', 'messages-consumed'])
+    })
+
+    it('does not download transcript bodies on the list page and retains scheduled bookkeeping', () => {
+        const manager = new SSEManager(0, new VisibilityTracker())
+        const received: SyncEvent[] = []
+        manager.subscribe({
+            id: 'list', namespace: 'alpha', all: true, selectedMessagesOnly: true,
+            send: event => { received.push(event) }, sendHeartbeat: () => {}
+        })
+        const message = { id: 'm1', seq: 1, localId: null, content: {}, createdAt: 1 }
+        manager.broadcast({ type: 'message-received', namespace: 'alpha', sessionId: 'other', message })
+        manager.broadcast({ type: 'message-received', namespace: 'alpha', sessionId: 'other', message: { ...message, scheduledAt: 2 } })
+        expect(received).toHaveLength(1)
+    })
+
     it('routes events to matching namespace', () => {
         const manager = new SSEManager(0, new VisibilityTracker())
         const receivedAlpha: SyncEvent[] = []

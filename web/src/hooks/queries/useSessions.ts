@@ -22,6 +22,7 @@ export function useSessions(api: ApiClient | null, options: UseSessionsOptions =
             return await api.getSessions()
         },
         enabled: Boolean(api) && (options.enabled ?? true),
+        networkMode: 'always',
     })
 
     return {

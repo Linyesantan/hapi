@@ -24,6 +24,7 @@ import { queryKeys } from '@/lib/query-keys'
 import { applyAgyCatalogAnnouncement } from '@/lib/agyCatalogAnnouncement'
 import { clearMessageWindow, getMessageWindowState, ingestIncomingMessages, markMessagesConsumed, markMessagesIndeterminate, markMessagesRequeued, removeOptimisticMessage, updateMessageStatus } from '@/lib/message-window-store'
 import { applySessionDetailPatch } from '@/lib/sessionPatch'
+import { offlineCacheFor } from '@/lib/offline-cache'
 
 // Pure patch-application rules live in @/lib/sessionPatch (React-free, shared
 // with the fixture generator); re-exported here so hook consumers and existing
@@ -32,11 +33,12 @@ export { applySessionDetailPatch, isNewerVersionedPatch, isRenderIrrelevantSessi
 
 type SSESubscription = {
     all?: boolean
+    selectedMessagesOnly?: boolean
     sessionId?: string
     machineId?: string
 }
 
-export type SSEScope = 'global' | 'full'
+export type SSEScope = 'global' | 'full' | 'app'
 
 const MESSAGE_STREAM_EVENT_TYPES = new Set<SyncEvent['type']>([
     'message-received',
@@ -52,7 +54,7 @@ export function isGlobalScopedMessageStreamEvent(scope: SSEScope, eventType: Syn
 }
 
 export function shouldInvalidateSessionListForEvent(scope: SSEScope, eventType: SyncEvent['type']): boolean {
-    return scope === 'global' && eventType === 'messages-invalidated'
+    return scope !== 'full' && eventType === 'messages-invalidated'
 }
 
 /**
@@ -211,6 +213,15 @@ function getVisibilityState(): VisibilityState {
     return document.visibilityState === 'visible' ? 'visible' : 'hidden'
 }
 
+function isLoopbackHub(baseUrl: string): boolean {
+    try {
+        const host = new URL(baseUrl || globalThis.location.href).hostname
+        return ['127.0.0.1', 'localhost', '[::1]', '::1'].includes(host)
+    } catch {
+        return false
+    }
+}
+
 function buildEventsUrl(
     baseUrl: string,
     token: string,
@@ -223,6 +234,9 @@ function buildEventsUrl(
     params.set('visibility', visibility)
     if (subscription.all) {
         params.set('all', 'true')
+    }
+    if (subscription.selectedMessagesOnly) {
+        params.set('selectedMessagesOnly', 'true')
     }
     if (subscription.sessionId) {
         params.set('sessionId', subscription.sessionId)
@@ -312,8 +326,8 @@ export function useSSE(options: {
     const scope = options.scope ?? 'full'
 
     const subscriptionKey = useMemo(() => {
-        return `${scope}|${subscription.all ? '1' : '0'}|${subscription.sessionId ?? ''}|${subscription.machineId ?? ''}`
-    }, [scope, subscription.all, subscription.sessionId, subscription.machineId])
+        return `${scope}|${subscription.all ? '1' : '0'}|${subscription.sessionId ?? ''}|${subscription.machineId ?? ''}|${subscription.selectedMessagesOnly ? 'selected' : 'all'}`
+    }, [scope, subscription.all, subscription.sessionId, subscription.machineId, subscription.selectedMessagesOnly])
 
     useEffect(() => {
         if (!options.enabled) {
@@ -365,7 +379,9 @@ export function useSSE(options: {
             }
 
             const attempt = reconnectAttemptRef.current
-            const maxDelay = attempt >= RECONNECT_SLOW_AFTER_ATTEMPTS
+            // A local SSH tunnel can recover without a browser "online" event.
+            // Keep foreground recovery prompt even after a long offline read.
+            const maxDelay = isLoopbackHub(options.baseUrl) ? 5_000 : attempt >= RECONNECT_SLOW_AFTER_ATTEMPTS
                 ? RECONNECT_SLOW_MAX_DELAY_MS
                 : RECONNECT_MAX_DELAY_MS
             // First attempt reconnects immediately (jitter only) — backoff is
@@ -645,12 +661,30 @@ export function useSSE(options: {
 
         const handleSyncEvent = (event: SyncEvent) => {
             lastActivityAtRef.current = Date.now()
+            const cache = offlineCacheFor(options.baseUrl, options.token)
+            if (scope !== 'full') {
+                if (event.type === 'message-received') void cache?.ingest(event.sessionId, [event.message])
+                if (event.type === 'messages-invalidated') void cache?.invalidate(event.sessionId)
+                if (event.type === 'message-cancelled') void cache?.removeMessage(event.sessionId, event.messageId)
+                if (event.type === 'messages-consumed') {
+                    void cache?.updateLocalIds(event.sessionId, event.localIds, (message) => ({
+                        ...message, invokedAt: message.invokedAt ?? event.invokedAt, status: 'sent',
+                        deliveryState: undefined, ...(event.steered ? { steered: true } : {})
+                    }))
+                }
+                if (event.type === 'messages-indeterminate' || event.type === 'messages-requeued') {
+                    void cache?.updateLocalIds(event.sessionId, event.localIds, (message) => ({
+                        ...message, deliveryState: event.type === 'messages-indeterminate' ? 'indeterminate' : undefined
+                    }))
+                }
+            }
 
             if (event.type === 'heartbeat') {
                 return
             }
 
             if (event.type === 'connection-changed') {
+                cache?.setOffline(false)
                 const data = event.data
                 if (data && typeof data === 'object' && 'subscriptionId' in data) {
                     const nextId = (data as { subscriptionId?: unknown }).subscriptionId
@@ -676,7 +710,7 @@ export function useSSE(options: {
                 queueSessionListInvalidation()
             }
 
-            if (scope === 'global' && MESSAGE_STREAM_EVENT_TYPES.has(event.type)) {
+            if (scope !== 'full' && MESSAGE_STREAM_EVENT_TYPES.has(event.type)) {
                 if (event.type === 'message-received' && event.message.scheduledAt != null) {
                     queueSessionListInvalidation()
                 }
@@ -689,24 +723,24 @@ export function useSSE(options: {
                 ) {
                     queueSessionListInvalidation()
                 }
-                // The global `all` subscription also receives message-stream events.
-                // Session-scoped SSE normally drives the message window, but during
-                // reconnect gaps or while another session is selected, only the global
-                // connection may be alive — still clear the queued bar / optimistic rows.
-                if (event.type === 'messages-consumed') {
-                    markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+                // The app stream drives its selected window; other conversations
+                // still send small queue/cancellation events for list bookkeeping.
+                if (scope === 'global' || !('sessionId' in event) || event.sessionId !== subscription.sessionId) {
+                    if (event.type === 'messages-consumed') {
+                        markMessagesConsumed(event.sessionId, event.localIds, event.invokedAt, event.steered)
+                    }
+                    if (event.type === 'messages-indeterminate') {
+                        markMessagesIndeterminate(event.sessionId, event.localIds)
+                    }
+                    if (event.type === 'messages-requeued') {
+                        markMessagesRequeued(event.sessionId, event.localIds)
+                    }
+                    if (event.type === 'message-cancelled') {
+                        removeOptimisticMessage(event.sessionId, event.messageId)
+                    }
+                    onEventRef.current(event)
+                    return
                 }
-                if (event.type === 'messages-indeterminate') {
-                    markMessagesIndeterminate(event.sessionId, event.localIds)
-                }
-                if (event.type === 'messages-requeued') {
-                    markMessagesRequeued(event.sessionId, event.localIds)
-                }
-                if (event.type === 'message-cancelled') {
-                    removeOptimisticMessage(event.sessionId, event.messageId)
-                }
-                onEventRef.current(event)
-                return
             }
 
             if (event.type === 'messages-consumed') {
@@ -733,6 +767,7 @@ export function useSSE(options: {
 
             if (event.type === 'session-added' || event.type === 'session-updated' || event.type === 'session-removed') {
                 if (event.type === 'session-removed') {
+                    void cache?.invalidate(event.sessionId, true)
                     removeSessionSummary(event.sessionId)
                     void queryClient.removeQueries({ queryKey: queryKeys.session(event.sessionId) })
                     clearMessageWindow(event.sessionId)
@@ -762,6 +797,12 @@ export function useSSE(options: {
                         queueSessionDetailInvalidation(event.sessionId)
                         queueSessionListInvalidation()
                     }
+                }
+                if (event.type !== 'session-removed') {
+                    const detail = queryClient.getQueryData<SessionResponse>(queryKeys.session(event.sessionId))
+                    if (detail) void cache?.putValue(`session:${event.sessionId}`, detail)
+                    const sessions = queryClient.getQueryData<SessionsResponse>(queryKeys.sessions)
+                    if (sessions) void cache?.putValue('sessions', sessions)
                 }
             }
 

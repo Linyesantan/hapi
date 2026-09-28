@@ -197,13 +197,14 @@ describe('listSlashCommands', () => {
             'plan',
             'default',
             'init',
+            'model',
+            'reasoning',
+            'effort',
+            'permissions',
+            'permission',
+            'clear',
+            'compact',
         ]))
-        // Anything covered by composer buttons, plus aliases and unsupported
-        // placeholders, must stay out of the autocomplete menu — the resolver
-        // still accepts them when typed manually.
-        for (const hidden of ['model', 'reasoning', 'effort', 'permissions', 'permission', 'clear', 'compact']) {
-            expect(names).not.toContain(hidden)
-        }
     })
 
     it('loads OpenCode user and project commands', async () => {

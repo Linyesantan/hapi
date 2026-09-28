@@ -1,5 +1,27 @@
 import type { AgentEvent } from '@/chat/types'
 
+// Date.toLocaleString(options) constructs an Intl formatter on every call.
+// Reuse a bounded set: a chat render can format hundreds of timestamps at once.
+function dateFormatter(options: Intl.DateTimeFormatOptions, locale?: string): (date: Date) => string {
+    let formatter: Intl.DateTimeFormat | undefined
+    return (date) => {
+        if (Number.isNaN(date.getTime())) return date.toString()
+        formatter ??= new Intl.DateTimeFormat(locale, options)
+        return formatter.format(date)
+    }
+}
+
+const resetClock = dateFormatter({ hour: 'numeric', minute: '2-digit' })
+const resetDate = dateFormatter({ month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+const messageClock = dateFormatter({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+const messageDate = dateFormatter({ month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+const messageYear = dateFormatter({ year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+const outlineClock = {
+    en: dateFormatter({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }, 'en'),
+    'zh-CN': dateFormatter({ hour: '2-digit', minute: '2-digit', hourCycle: 'h23' }, 'zh-CN')
+}
+const messageTitle = dateFormatter({ year: 'numeric', month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit', second: '2-digit' })
+
 function normalizeTimestamp(value: number): Date {
     const ms = value < 1_000_000_000_000 ? value * 1000 : value
     return new Date(ms)
@@ -21,9 +43,9 @@ export function formatResetTime(value: number): string {
         && date.getDate() === now.getDate()
 
     if (isToday) {
-        return date.toLocaleTimeString(undefined, { hour: 'numeric', minute: '2-digit' })
+        return resetClock(date)
     }
-    return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: 'numeric', minute: '2-digit' })
+    return resetDate(date)
 }
 
 export function formatMessageTimestamp(date: Date, now: Date = new Date()): string {
@@ -32,15 +54,15 @@ export function formatMessageTimestamp(date: Date, now: Date = new Date()): stri
         && date.getDate() === now.getDate()
 
     if (sameDay) {
-        return date.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+        return messageClock(date)
     }
 
     const sameYear = date.getFullYear() === now.getFullYear()
     if (sameYear) {
-        return date.toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+        return messageDate(date)
     }
 
-    return date.toLocaleString(undefined, { year: 'numeric', month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    return messageYear(date)
 }
 
 export function formatOutlineTimestamp(
@@ -51,7 +73,7 @@ export function formatOutlineTimestamp(
     const sameDay = date.getFullYear() === now.getFullYear()
         && date.getMonth() === now.getMonth()
         && date.getDate() === now.getDate()
-    const time = date.toLocaleTimeString(locale, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
+    const time = outlineClock[locale](date)
 
     if (sameDay) {
         return time
@@ -72,14 +94,7 @@ export function formatOutlineTimestamp(
 }
 
 export function formatMessageTimestampTitle(date: Date): string {
-    return date.toLocaleString(undefined, {
-        year: 'numeric',
-        month: 'short',
-        day: 'numeric',
-        hour: 'numeric',
-        minute: '2-digit',
-        second: '2-digit'
-    })
+    return messageTitle(date)
 }
 
 // Known types: five_hour → "5-hour", seven_day → "7-day".

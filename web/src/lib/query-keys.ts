@@ -1,5 +1,11 @@
 export const queryKeys = {
     sessions: ['sessions'] as const,
+    phoneCodexSessions: ['phone-codex-sessions'] as const,
+    phoneHistorySessionsRoot: ['phone-history-sessions'] as const,
+    phoneHistorySessions: (agent: string) => ['phone-history-sessions', agent] as const,
+    nativeCodexTerminal: (sessionId: string, machineId?: string | null) => ['native-codex-terminal', machineId ?? '', sessionId] as const,
+    nativeTerminal: (agent: string, sessionId: string, machineId?: string | null) => ['native-terminal', agent, machineId ?? '', sessionId] as const,
+    phoneQueuedMessages: ['phone-queued-messages'] as const,
     session: (sessionId: string) => ['session', sessionId] as const,
     messages: (sessionId: string) => ['messages', sessionId] as const,
     machines: ['machines'] as const,

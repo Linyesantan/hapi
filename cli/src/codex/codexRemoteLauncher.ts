@@ -3072,7 +3072,17 @@ class CodexRemoteLauncher extends RemoteLauncherBase {
             } else if (msgType === 'task_started') {
                 messageBuffer.addMessage('Starting task...', 'status');
             } else if (msgType === 'task_complete') {
-                messageBuffer.addMessage('Task completed', 'status');
+                const completionError = asString(msg.error);
+                if (completionError) {
+                    // Codex 0.5x reports turn failures (e.g. "high demand")
+                    // as task_complete with an error payload; the phone must
+                    // see them instead of a plain "Task completed".
+                    const failureMessage = `Task failed: ${completionError}`;
+                    messageBuffer.addMessage(failureMessage, 'status');
+                    session.sendSessionEvent({ type: 'message', message: failureMessage });
+                } else {
+                    messageBuffer.addMessage('Task completed', 'status');
+                }
             } else if (msgType === 'turn_aborted') {
                 messageBuffer.addMessage('Turn aborted', 'status');
             } else if (msgType === 'task_failed') {

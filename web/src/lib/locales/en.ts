@@ -355,6 +355,8 @@ export default {
   'newSession.type.worktree.placeholder': 'feature-x (default 1228-xxxx)',
   'newSession.agent': 'Agent',
   'newSession.agentAvailabilityLoading': 'Checking installed Agents…',
+  'newSession.dshWebRunning': 'DSH Web is running',
+  'newSession.dshWebOpen': 'Open',
   'newSession.agentAvailabilityFailed': 'Could not check installed Agents.',
   'newSession.runnerUpgradeRequired': 'Upgrade and restart this machine\'s HAPI runner before creating sessions.',
   'newSession.noAvailableAgents': 'No supported Agents are installed on this machine.',

@@ -294,6 +294,12 @@ export function HappyComposer(props: {
     modelReasoningEffort?: string | null
     effort?: string | null
     active?: boolean
+    historyReadOnly?: boolean
+    nativeStatus?: { text: string; running: boolean }
+    nativeTerminalInput?: boolean
+    onSendNative?: (text: string, attachments: import('@/types/api').AttachmentMetadata[], intent: ComposerSendIntent) => Promise<boolean>
+    onOpenNativeModelMenu?: () => void
+    historySourceState?: import('@hapi/protocol/schemas').HistorySourceState
     allowSendWhenInactive?: boolean
     thinking?: boolean
     agentState?: AgentState | null
@@ -529,8 +535,8 @@ export function HappyComposer(props: {
         onScratchlistParkingChange?.(isParkingScratchlist)
     }, [isParkingScratchlist, onScratchlistParkingChange])
 
-    const configurationControlsDisabled = (!active && !allowSendWhenInactive) || isParkingScratchlist
-    const controlsDisabled = disabled || threadIsDisabled || configurationControlsDisabled
+    const configurationControlsDisabled = props.nativeTerminalInput || (!active && !allowSendWhenInactive) || isParkingScratchlist
+    const controlsDisabled = disabled || threadIsDisabled || (!active && !allowSendWhenInactive) || isParkingScratchlist
     const trimmed = composerText.trim()
     const hasText = trimmed.length > 0
     const hasAttachments = attachments.length > 0
@@ -553,6 +559,7 @@ export function HappyComposer(props: {
     const lastSendAcceptanceRef = useRef(props.sendAcceptance)
     const pendingSendAttemptIdRef = useRef<string | null>(null)
     const [showSettings, setShowSettings] = useState(false)
+    const [modelCommandError, setModelCommandError] = useState<string | null>(null)
     // Anchored settings sheet: the model/effort value buttons open only their
     // own section; the gear (null) opens the full sheet.
     const [settingsSection, setSettingsSection] = useState<'model' | 'effort' | null>(null)
@@ -1158,6 +1165,45 @@ export function HappyComposer(props: {
             richInputRef.current.flushSerializedText()
         }
 
+        // Slash commands that open a picker must not become chat messages or
+        // scratchlist entries. Keep attachments and scheduling choices intact.
+        if (/^\/models?\s*$/i.test(api.composer().getState().text.trim())) {
+            if (props.onOpenNativeModelMenu) {
+                props.onOpenNativeModelMenu()
+            } else if (onModelChange && supportsModelChange(agentFlavor) && !configurationControlsDisabled) {
+                setSettingsSection('model')
+                setShowSettings(true)
+            } else {
+                setModelCommandError('当前会话暂时无法切换模型，请先恢复终端连接。')
+                return
+            }
+            setModelCommandError(null)
+            api.composer().setText('')
+            setInputState({ text: '', selection: { start: 0, end: 0 } })
+            return
+        }
+
+        if (props.onSendNative) {
+            if (!canSend || parkInFlightRef.current) return
+            parkInFlightRef.current = true
+            try {
+                const snapshot = api.composer().getState()
+                const items = orderItemsById(snapshot.attachments, attachmentOrderRef.current).map(item => {
+                    const upload = item as typeof item & { path?: string; previewUrl?: string; previewText?: string; previewTruncated?: boolean }
+                    if (!upload.path) throw new Error('附件尚未上传成功。')
+                    return { id: item.id, filename: item.name, mimeType: item.contentType ?? 'application/octet-stream', size: item.file?.size ?? 0,
+                        path: upload.path, previewUrl: upload.previewUrl, previewText: upload.previewText, previewTruncated: upload.previewTruncated }
+                })
+                if (await props.onSendNative(snapshot.text, items, restoredIntent)
+                    && composerParkSnapshotUnchanged(snapshot, api.composer().getState())) {
+                    api.composer().setText('')
+                    await api.composer().clearAttachments()
+                    setIsExpanded(false)
+                }
+            } finally { parkInFlightRef.current = false }
+            return
+        }
+
         // Scratchlist parks must not go through assistant-ui's send(): it
         // empties text/chips before onNew, so a rejected add cannot restore
         // retryable composer state (#1226 Major).
@@ -1249,7 +1295,12 @@ export function HappyComposer(props: {
         sendError,
         attachmentOrderRef,
         pendingSendIntentRef,
+        props.onSendNative,
         resetPendingSendIntent,
+        props.onOpenNativeModelMenu,
+        onModelChange,
+        agentFlavor,
+        configurationControlsDisabled,
     ])
 
     const flushAndSend = useCallback((intent: ComposerSendIntent = 'default') => {
@@ -1741,10 +1792,11 @@ export function HappyComposer(props: {
         const sheetCopilotAgentModeSettings = showCopilotAgentModeSettings && sheetOthersOn
         const sheetModelAreaSettings = sheetModelSettings || sheetModelEffortSettings || sheetModelReasoningEffortSettings || sheetEffortSettings
         const sheetOtherSettings = sheetFastModeSettings || sheetCollaborationSettings || sheetCopilotAgentModeSettings
-        if (showSettings && (sheetCollaborationSettings || sheetCopilotAgentModeSettings || sheetPermissionSettings || sheetModelSettings || sheetModelEffortSettings || sheetModelReasoningEffortSettings || sheetEffortSettings || sheetFastModeSettings)) {
+        if (showSettings && (settingsSection === 'model' || sheetCollaborationSettings || sheetCopilotAgentModeSettings || sheetPermissionSettings || sheetModelSettings || sheetModelEffortSettings || sheetModelReasoningEffortSettings || sheetEffortSettings || sheetFastModeSettings)) {
             return (
-                <div ref={settingsOverlayRef} className={`${overlayPositionClass} w-full`}>
+                <div ref={settingsOverlayRef} className={`${overlayPositionClass} w-full`} role="dialog" aria-label={settingsSection === 'model' ? '模型选择' : undefined}>
                     <FloatingOverlay maxHeight={320}>
+                        {settingsSection === 'model' && !sheetModelSettings ? <p role="status" className="p-3 text-sm text-[var(--app-hint)]">正在等待此会话的可用模型列表…</p> : null}
                         {sheetModelSettings ? (
                             <div className="py-2">
                                 <div className="px-3 pb-1 text-xs font-semibold text-[var(--app-hint)]">
@@ -2204,6 +2256,9 @@ export function HappyComposer(props: {
 
                     <StatusBar
                         active={active}
+                        historyReadOnly={props.historyReadOnly}
+                        nativeStatus={props.nativeStatus}
+                        historySourceState={props.historySourceState}
                         thinking={thinking}
                         agentState={agentState}
                         backgroundTaskCount={backgroundTaskCount}
@@ -2366,6 +2421,7 @@ export function HappyComposer(props: {
                             />
                         ) : null}
 
+                        {modelCommandError ? <p role="alert" className="px-2 text-sm text-[var(--app-warning)]">{modelCommandError}</p> : null}
                         <ComposerButtons
                             canSend={canSend}
                             controlsDisabled={controlsDisabled}

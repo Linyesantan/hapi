@@ -133,7 +133,7 @@ describe('Pi command namespaces', () => {
         { name: 'skill:brave-search', description: 'Search the web', source: 'skill' as const },
     ];
 
-    it('exposes native skills through $ and keeps them out of slash completion', () => {
+    it('exposes native skills through both $ and their native slash commands', () => {
         expect(buildPiCommandInventory(commands)).toEqual({
             skills: [
                 { name: 'brave-search', description: 'Search the web' },
@@ -141,6 +141,7 @@ describe('Pi command namespaces', () => {
             slashCommands: [
                 { name: 'session-name', description: 'Rename session', source: 'plugin' },
                 { name: 'fix-tests', description: 'Fix tests', source: 'user' },
+                { name: 'skill:brave-search', description: 'Search the web', source: 'plugin' },
             ],
         });
     });
@@ -1874,8 +1875,7 @@ describe('Pi built-in slash commands', () => {
         const result = await slashHandler({ agent: 'pi' });
         const names = (result as { commands: Array<{ name: string }> }).commands.map((command) => command.name);
         expect(names).toEqual(expect.arrayContaining(['compact', 'session', 'model', 'help', 'test-extension']));
-        // Skills stay out of slash completion; they surface via $ instead.
-        expect(names).not.toContain('skill:brave-search');
+        expect(names).toContain('skill:brave-search');
 
         harness.onError?.(new Error('finish test'));
         await running;

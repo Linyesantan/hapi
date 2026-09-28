@@ -4,9 +4,13 @@ import type { KeyboardEventHandler, MouseEventHandler, PointerEventHandler, Poin
 import { ImagePreview } from '@/components/ImagePreview'
 import { Spinner } from '@/components/Spinner'
 import { useComposerParking } from '@/components/AssistantChat/composerParkingContext'
+import { AttachmentFilePreview } from '@/components/AttachmentFilePreview'
 
 type ComposerAttachmentWithPreview = PendingAttachment & {
     previewUrl?: string
+    previewText?: string
+    previewTruncated?: boolean
+    errorMessage?: string
 }
 
 export type AttachmentDragHandleProps = {
@@ -95,7 +99,7 @@ function DragHandle(props: AttachmentDragHandleProps & { isFile?: boolean }) {
 }
 
 export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandleProps } = {}) {
-    const { name, status, previewUrl } = useAuiState((s) => s.attachment) as ComposerAttachmentWithPreview
+    const { name, status, previewUrl, previewText, previewTruncated, errorMessage, contentType, file } = useAuiState((s) => s.attachment) as ComposerAttachmentWithPreview
     const isParking = useComposerParking()
     const isUploading = status.type === 'running'
     const isError = status.type === 'incomplete'
@@ -109,7 +113,7 @@ export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandlePr
         }
         : undefined
 
-    if (previewUrl && !isError) {
+    if (previewUrl) {
         return (
             <AttachmentPrimitive.Root
                 className="group relative h-16 w-24 overflow-hidden rounded-lg bg-[var(--app-subtle-bg)]"
@@ -140,6 +144,9 @@ export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandlePr
                         <Spinner size="sm" label={null} className="text-white" />
                     </div>
                 ) : null}
+                {isError ? <span role="alert" className="pointer-events-none absolute inset-x-0 bottom-0 bg-red-950/90 px-1 py-0.5 text-[10px] leading-tight text-white" title={errorMessage}>
+                    {errorMessage ?? '上传失败，请重试'}
+                </span> : null}
                 {!isParking ? (
                     <AttachmentPrimitive.Remove
                         className="hapi-composer-attachment-control absolute right-1 top-1 z-20 flex h-8 w-8 items-start justify-end rounded-md bg-transparent text-white transition-colors hover:bg-black/15 focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-white"
@@ -168,8 +175,8 @@ export function AttachmentItem(props: { dragHandleProps?: AttachmentDragHandlePr
                     <ErrorIcon />
                 </span>
             ) : null}
-            <span className={`max-w-[150px] truncate ${isError ? 'text-red-500 line-through' : ''}`}>{name}</span>
-            {isError ? <span className="text-xs text-red-500 whitespace-nowrap">Upload failed</span> : null}
+            <AttachmentFilePreview attachment={{ filename: name, mimeType: contentType ?? 'application/octet-stream', size: file?.size ?? 0, previewText, previewTruncated }} />
+            {isError ? <span role="alert" className="max-w-48 text-xs text-red-500">{errorMessage ?? '上传失败，请重试'}</span> : null}
             {!isParking ? (
                 <AttachmentPrimitive.Remove
                     className="hapi-composer-attachment-control hapi-composer-attachment-file-control -mx-1 flex h-6 w-6 shrink-0 items-center justify-center rounded-md bg-transparent text-[var(--app-hint)] transition-colors hover:text-[var(--app-fg)] focus-visible:outline-2 focus-visible:outline-offset-1 focus-visible:outline-[var(--app-link)]"

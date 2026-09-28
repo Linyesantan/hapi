@@ -4,6 +4,7 @@ import { createElement, type ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type { SessionSummary } from '@/types/api'
 import type { Session } from '@/types/api'
+import { clearMessageWindow, getMessageWindowState } from '@/lib/message-window-store'
 import {
     applySessionDetailPatch,
     canApplyVersionedSummaryPatch,
@@ -45,14 +46,14 @@ class FakeEventSource {
     }
 }
 
-function renderUseSSE(options?: { onDisconnect?: (reason: string) => void }) {
+function renderUseSSE(options?: { onDisconnect?: (reason: string) => void; baseUrl?: string }) {
     const queryClient = new QueryClient()
     const wrapper = ({ children }: { children: ReactNode }) =>
         createElement(QueryClientProvider, { client: queryClient }, children)
     return renderHook(() => useSSE({
         enabled: true,
         token: 'test-token',
-        baseUrl: 'http://hub.test',
+        baseUrl: options?.baseUrl ?? 'http://hub.test',
         subscription: { all: true },
         onEvent: () => {},
         onDisconnect: options?.onDisconnect
@@ -69,6 +70,31 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
     afterEach(() => {
         vi.unstubAllGlobals()
         vi.useRealTimers()
+    })
+
+    it('uses one app stream and keeps transcript bodies in the selected window only', () => {
+        const queryClient = new QueryClient()
+        const wrapper = ({ children }: { children: ReactNode }) =>
+            createElement(QueryClientProvider, { client: queryClient }, children)
+        const { unmount } = renderHook(() => useSSE({
+            enabled: true, token: 'test-token', baseUrl: 'http://hub.test', scope: 'app',
+            subscription: { all: true, selectedMessagesOnly: true, sessionId: 'app-selected' },
+            onEvent: () => {}
+        }), { wrapper })
+        const source = FakeEventSource.instances[0]!
+        expect(FakeEventSource.instances).toHaveLength(1)
+        expect(new URL(source.url).searchParams.get('selectedMessagesOnly')).toBe('true')
+        const message = { id: 'app-message', seq: 1, localId: null, createdAt: 1, content: {} }
+        act(() => {
+            source.simulateMessage({ type: 'message-received', sessionId: 'app-selected', message })
+            source.simulateMessage({ type: 'message-received', sessionId: 'app-other', message })
+        })
+        expect(getMessageWindowState('app-selected').messages.map(item => item.id)).toEqual(['app-message'])
+        expect(getMessageWindowState('app-other').messages).toEqual([])
+        unmount()
+        clearMessageWindow('app-selected')
+        clearMessageWindow('app-other')
+        queryClient.clear()
     })
 
     it('reconnects on visibility resume when a heartbeat interval was missed', () => {
@@ -91,6 +117,16 @@ describe('useSSE connection liveness (mobile suspend/resume)', () => {
         act(() => { vi.advanceTimersByTime(600) })
         expect(FakeEventSource.instances).toHaveLength(2)
 
+        unmount()
+    })
+
+    it('keeps retrying a recovered localhost tunnel promptly after prolonged failure', () => {
+        const { unmount } = renderUseSSE({ baseUrl: 'http://127.0.0.1:8767' })
+        for (let attempt = 0; attempt < 12; attempt++) {
+            act(() => { FakeEventSource.instances.at(-1)?.onerror?.(new Event('error')) })
+            act(() => { vi.advanceTimersByTime(5_501) })
+            expect(FakeEventSource.instances).toHaveLength(attempt + 2)
+        }
         unmount()
     })
 
@@ -263,6 +299,7 @@ describe('isNewerVersionedPatch (PR #897 review, HAPI Bot 2026-06-16 Major)', ()
 describe('useSSE scope handling', () => {
     it('invalidates the global session list when message ownership changes', () => {
         expect(shouldInvalidateSessionListForEvent('global', 'messages-invalidated')).toBe(true)
+        expect(shouldInvalidateSessionListForEvent('app', 'messages-invalidated')).toBe(true)
         expect(shouldInvalidateSessionListForEvent('full', 'messages-invalidated')).toBe(false)
     })
 

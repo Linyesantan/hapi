@@ -7,6 +7,7 @@ export type SSESubscription = {
     id: string
     namespace: string
     all: boolean
+    selectedMessagesOnly?: boolean
     sessionId: string | null
     machineId: string | null
 }
@@ -66,6 +67,7 @@ export class SSEManager {
         id: string
         namespace: string
         all?: boolean
+        selectedMessagesOnly?: boolean
         sessionId?: string | null
         machineId?: string | null
         visibility?: VisibilityState
@@ -78,6 +80,7 @@ export class SSEManager {
             id: options.id,
             namespace: options.namespace,
             all: Boolean(options.all),
+            selectedMessagesOnly: Boolean(options.selectedMessagesOnly),
             sessionId: options.sessionId ?? null,
             machineId: options.machineId ?? null,
             send: options.send,
@@ -306,6 +309,13 @@ export class SSEManager {
             if (!eventNamespace || eventNamespace !== connection.namespace) {
                 return false
             }
+        }
+
+        // One app stream carries global state and only the selected transcript.
+        // Queue events remain global so unread/scheduled counters stay current.
+        if (connection.selectedMessagesOnly && event.type === 'message-received'
+            && event.message.scheduledAt == null && connection.sessionId !== event.sessionId) {
+            return false
         }
 
         if (event.type === 'message-received' || event.type === 'scheduled-matured') {

@@ -6,6 +6,7 @@ type AppContextValue = {
     token: string
     baseUrl: string
     titleSuggestionAvailable?: boolean
+    phoneGatewayEnabled?: boolean
 }
 
 const AppContext = createContext<AppContextValue | null>(null)

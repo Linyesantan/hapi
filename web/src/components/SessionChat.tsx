@@ -62,6 +62,8 @@ import {
 import type { MessageDeliveryMode } from '@hapi/protocol'
 import { isSteeringSupportedForSession } from '@hapi/protocol'
 import { createAttachmentAdapter } from '@/lib/attachmentAdapter'
+import { ComposerReveal, type ComposerRevealHandle } from '@/components/AssistantChat/ComposerReveal'
+import { useNativeTerminalControl } from '@/hooks/useNativeTerminalControl'
 import { rewindMessageWindow, type OlderLoadOutcome } from '@/lib/message-window-store'
 import { ShareSeedConsumer } from '@/components/ShareSeedConsumer'
 import {
@@ -87,11 +89,18 @@ import type { SendMessageAcceptance, SendMessageSettlement } from '@/hooks/mutat
 import { handoffComposerDraft, transferComposerDraftThenNavigate } from '@/lib/composer-draft-transfer'
 import { SessionHeader } from '@/components/SessionHeader'
 import { CursorMigrationBanner } from '@/components/CursorMigrationBanner'
+import { HistoryBanner } from '@/components/HistoryBanner'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
+import { historyAgent, historySourceId } from '@/lib/phoneHistory'
+import { NativeTerminalPanel } from '@/components/NativeTerminalPanel'
+import { NativeModelDialog } from '@/components/NativeModelDialog'
+import { useNativeTerminal, useNativeTerminalSend } from '@/hooks/useNativeTerminal'
 import { TeamPanel } from '@/components/TeamPanel'
 import { SessionStatusPanel } from '@/components/SessionStatusPanel'
 import { buildSessionStatusData } from '@/chat/sessionStatus'
 import { usePlatform } from '@/hooks/usePlatform'
 import { useSessionActions } from '@/hooks/mutations/useSessionActions'
+import { usePhoneSlashCommandActions } from '@/hooks/usePhoneSlashCommandActions'
 import { useCodexModels } from '@/hooks/queries/useCodexModels'
 import { useCursorModels } from '@/hooks/queries/useCursorModels'
 import { useCursorModelsForMachine } from '@/hooks/queries/useCursorModelsForMachine'
@@ -599,6 +608,7 @@ type SessionChatProps = {
     onRetryMessage?: (localId: string) => void
     autocompleteSuggestions?: (query: string) => Promise<Suggestion[]>
     availableSlashCommands?: readonly SlashCommand[]
+    phoneGatewayEnabled?: boolean
     // The latest send the hub rejected (4xx/5xx/network).  When set, the
     // composer is asked to restore the typed text and surface an inline
     // error -- see HappyComposer.  Cleared by `onClearSendError` once the
@@ -682,7 +692,22 @@ function SessionChatInner(props: SessionChatProps) {
         await onForkConversation(rewindForkFallback)
         setRewindForkFallback(null)
     }, [onForkConversation, rewindForkFallback])
-    const sessionInactive = !props.session.active
+    const historyReadOnly = isReadOnlyHistory(props.session.metadata)
+    const nativeAgent: 'codex' | 'opencode' | null = historyReadOnly && props.phoneGatewayEnabled
+        && (props.session.metadata?.flavor === 'codex' || props.session.metadata?.flavor === 'opencode')
+        ? props.session.metadata.flavor : null
+    const nativeSessionId = historySourceId(props.session.metadata)
+    const nativeRequest = nativeAgent && nativeSessionId ? { agent: nativeAgent, sessionId: nativeSessionId } : null
+    const nativeTerminal = useNativeTerminal(props.api, nativeRequest, props.session.metadata?.machineId)
+    const nativeSend = useNativeTerminalSend(props.api, props.session.id)
+    const nativeControl = useNativeTerminalControl(props.api, props.session.id)
+    const [nativeModelOpen, setNativeModelOpen] = useState(false)
+    const nativeCanCompose = Boolean(nativeRequest && (nativeTerminal.data?.running ?? props.session.metadata?.historySourceState?.state === 'running'))
+    const nativeStatus = nativeCanCompose ? {
+        text: nativeTerminal.stale ? '原终端暂未连接 · 草稿保留' : nativeTerminal.data?.busy ? '正在回复 · 新消息加入等待队列' : nativeTerminal.canSend ? '原终端运行中 · 可发送' : '原终端运行中 · 等待输入',
+        running: !nativeTerminal.stale
+    } : undefined
+    const sessionInactive = !props.session.active || historyReadOnly
     const inactiveCanResume = inactiveSessionCanResume(
         props.session,
         props.messages.length,
@@ -711,6 +736,10 @@ function SessionChatInner(props: SessionChatProps) {
     })
     const [outlineOpen, setOutlineOpen] = useState(props.initialOutlineOpen ?? false)
     const [terminalVisible, setTerminalVisible] = useState(false)
+    const composerRevealRef = useRef<ComposerRevealHandle>(null)
+    // Scrolling changes only the reveal wrapper; rerendering the full session
+    // here can consume the entire animation interval before the next paint.
+    const setComposerVisible = useCallback((visible: boolean) => composerRevealRef.current?.setVisible(visible), [])
     useEffect(() => {
         if (!props.initialOutlineOpen) {
             return
@@ -1683,9 +1712,28 @@ function SessionChatInner(props: SessionChatProps) {
 
     // Abort handler
     const handleAbort = useCallback(async () => {
+        if (nativeCanCompose) {
+            const fresh = await nativeTerminal.refetch()
+            await nativeControl.perform('interrupt', fresh.data?.input?.binding)
+            return
+        }
         await abortSession()
         props.onRefresh()
-    }, [abortSession, props.onRefresh])
+    }, [abortSession, props.onRefresh, nativeCanCompose, nativeTerminal.refetch, nativeControl.perform])
+
+    useEffect(() => {
+        if (!props.phoneGatewayEnabled) return
+        const onEscape = (event: KeyboardEvent) => {
+            if (event.key !== 'Escape' || event.defaultPrevented || event.isComposing
+                || document.querySelector('[role="dialog"], [role="listbox"]')) return
+            const running = nativeCanCompose ? nativeTerminal.data?.busy : props.session.active && props.session.thinking
+            if (!running) return
+            event.preventDefault()
+            void handleAbort()
+        }
+        window.addEventListener('keydown', onEscape)
+        return () => window.removeEventListener('keydown', onEscape)
+    }, [props.phoneGatewayEnabled, props.session.active, props.session.thinking, nativeCanCompose, nativeTerminal.data?.busy, handleAbort])
 
     // Switch to remote handler
     const handleSwitchToRemote = useCallback(async () => {
@@ -1753,8 +1801,9 @@ function SessionChatInner(props: SessionChatProps) {
 
     const handleClearSendError = useCallback(() => {
         pendingSendIntentRef.current = 'default'
+        nativeSend.clearError()
         props.onClearSendError?.()
-    }, [props.onClearSendError])
+    }, [props.onClearSendError, nativeSend.clearError])
 
     // Auto-clear absolute-type pendingSchedule when the chosen time expires so
     // the composer clock button doesn't stay active past the scheduled instant.
@@ -1774,12 +1823,38 @@ function SessionChatInner(props: SessionChatProps) {
         return () => clearTimeout(timer)
     }, [pendingSchedule, updatePendingSchedule])
 
+    const phoneSlashActions = usePhoneSlashCommandActions({
+        enabled: props.phoneGatewayEnabled,
+        api: props.api,
+        session: props.session,
+        commands: props.availableSlashCommands,
+        terminalSupported,
+        onFiles: handleToggleFiles,
+        onTerminal: handleViewTerminal,
+        onFork: onForkConversation,
+    })
+
     const handleSend = useCallback(async (
         text: string,
         attachments?: AttachmentMetadata[],
         scheduledAt?: number | null,
         intent: ComposerSendIntent = 'default',
     ) => {
+        if (historyReadOnly) {
+            if (!nativeCanCompose) return false
+            const command = await phoneSlashActions.handle(text, Boolean(attachments?.length), scheduledAt)
+            if (command.handled) return true
+            const fresh = await nativeTerminal.refetch()
+            const accepted = await nativeSend.send(command.text ?? text, fresh.data?.input?.binding,
+                scheduledAt ? '原终端暂不支持定时发送，请取消定时；回复期间的新消息会进入等待队列。' : undefined,
+                attachments, 'queue')
+            if (accepted) {
+                setSendAcceptance(accepted)
+                setForceScrollToken(token => token + 1)
+                void props.onRefresh()
+            }
+            return Boolean(accepted)
+        }
         // Route through the scratchlist-aware wrapper. When scratchlistMode
         // is on AND the payload is pure text, this turns into
         // addScratchlistEntry; otherwise it goes to props.onSend (the chat
@@ -1792,6 +1867,11 @@ function SessionChatInner(props: SessionChatProps) {
         // upstream review on PR #798: [Major] "Clear accepted scheduled
         // chat sends after scratchlist fallback".)
         const routedToScratchlist = shouldRouteToScratchlist(scratchlistMode, attachments, scheduledAt)
+        if (!routedToScratchlist) {
+            const command = await phoneSlashActions.handle(text, Boolean(attachments?.length), scheduledAt)
+            if (command.handled) return true
+            text = command.text ?? text
+        }
         const deliveryMode = resolveMessageDeliveryMode({
             agentFlavor,
             // Do not use assistant-ui's broader `isRunning` here: a
@@ -1802,7 +1882,7 @@ function SessionChatInner(props: SessionChatProps) {
             routesToScratchlist: routedToScratchlist,
         })
         const accepted = await onSendForComposer(text, attachments, scheduledAt, deliveryMode)
-        if (!accepted) return
+        if (!accepted) return false
         setSendAcceptance({ attemptId: accepted.attemptId })
         if (!routedToScratchlist) {
             // Clear pendingSchedule only after the mutation is actually
@@ -1815,9 +1895,14 @@ function SessionChatInner(props: SessionChatProps) {
             updatePendingSchedule(null)
             setForceScrollToken((token) => token + 1)
         }
-    }, [agentFlavor, onSendForComposer, props.session.thinking, scratchlistMode, updatePendingSchedule])
+        return true
+    }, [agentFlavor, onSendForComposer, props.session.thinking, scratchlistMode, updatePendingSchedule, historyReadOnly, phoneSlashActions.handle, nativeCanCompose, nativeSend.send, nativeTerminal.refetch, props.onRefresh])
 
     const attachmentAdapter = useMemo(() => {
+        if (historyReadOnly) return nativeAgent ? createAttachmentAdapter({
+            uploadFile: (id, name, content, mime) => props.api.uploadNativeTerminalFile(id, name, content, mime),
+            deleteUploadFile: (id, path) => props.api.deleteNativeTerminalUpload(id, path),
+        }, props.session.id) : undefined
         if (props.session.active && scratchlistMode) {
             const adapter = createScratchlistAttachmentAdapter(props.api, props.session.id)
             scratchlistAdapterRef.current = adapter
@@ -1863,7 +1948,7 @@ function SessionChatInner(props: SessionChatProps) {
                 )
             },
         )
-    }, [props.api, props.session.id, props.session.active, props.resolveSessionIdForUpload, scratchlistMode, inactiveCanResume])
+    }, [props.api, props.session.id, props.session.active, props.resolveSessionIdForUpload, scratchlistMode, inactiveCanResume, historyReadOnly, nativeAgent])
 
 
     const runtime = useHappyRuntime({
@@ -1874,13 +1959,13 @@ function SessionChatInner(props: SessionChatProps) {
         viewMode: props.viewMode,
         isSyncingTail: props.isSyncingTail,
         isLoadingMore: props.isLoadingMoreMessages,
-        isSending: props.isSending,
-        isRunning: props.session.thinking || hasRunningChildAgent,
+        isSending: props.isSending || nativeSend.isSending || (historyReadOnly && !nativeCanCompose),
+        isRunning: nativeCanCompose ? nativeTerminal.data?.busy === true : props.session.thinking || hasRunningChildAgent,
         onSendMessage: handleSend,
         attachmentOrderRef,
         onAbort: handleAbort,
         attachmentAdapter,
-        allowSendWhenInactive: true,
+        allowSendWhenInactive: !historyReadOnly || nativeCanCompose,
         pendingScheduleRef,
         pendingSendIntentRef,
     })
@@ -1926,7 +2011,8 @@ function SessionChatInner(props: SessionChatProps) {
                 <TeamPanel teamState={props.session.teamState} />
             )}
 
-            {sessionInactive ? (
+            {historyReadOnly ? <HistoryBanner key={props.session.id} sessionId={props.session.id} agent={historyAgent(props.session.metadata?.flavor) ?? 'codex'} sourceState={props.session.metadata?.historySourceState} onRefresh={props.onRefresh}
+                nativeStatus={nativeStatus} inputReason={nativeTerminal.data?.input?.reason} /> : sessionInactive ? (
                 <div className="mx-auto w-full max-w-content bg-[var(--app-subtle-bg)] p-3 text-center text-sm text-[var(--app-hint)]">
                     {inactiveCanResume
                         ? t('session.inactive.autoResume')
@@ -1935,9 +2021,9 @@ function SessionChatInner(props: SessionChatProps) {
             ) : null}
 
             <AssistantRuntimeProvider runtime={runtime}>
-                <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active} />
+                <ShareSeedConsumer sessionId={props.session.id} sessionActive={props.session.active || nativeCanCompose} />
                 <AbortRestoreConsumer messages={normalizedMessages} onAbortRestore={props.onAbortRestore ?? (() => {})} />
-                <DragDropZone disabled={(!props.session.active && !inactiveCanResume) || props.isSending || pendingSchedule != null || isScratchlistParking}>
+                <DragDropZone disabled={!attachmentAdapter || props.isSending || nativeSend.isSending || pendingSchedule != null || isScratchlistParking}>
                     <div className="relative flex min-h-0 flex-1 flex-col">
                         {canViewAgentTerminal && (
                             // SessionChatInner is keyed by session.id, so switching sessions remounts this subtree.
@@ -1965,8 +2051,8 @@ function SessionChatInner(props: SessionChatProps) {
                         onRetryMessage={props.onRetryMessage}
                         onContinuePlan={() => focusComposerRef.current?.()}
                         historyActionPending={historyActionPending}
-                        onForkConversation={controlledByUser ? undefined : onForkConversation}
-                        onRewindConversation={controlledByUser ? undefined : onRewindConversation}
+                        onForkConversation={controlledByUser || historyReadOnly ? undefined : onForkConversation}
+                        onRewindConversation={controlledByUser || historyReadOnly ? undefined : onRewindConversation}
                         isLatestCompletedBoundary={isLatestCompletedBoundary}
                         onViewModeChange={props.onViewModeChange}
                         isSyncingTail={props.isSyncingTail}
@@ -1984,10 +2070,30 @@ function SessionChatInner(props: SessionChatProps) {
                         outlineOpen={outlineOpen}
                         outlineItems={outlineItems}
                         onOutlineOpenChange={setOutlineOpen}
+                        onComposerVisibilityChange={props.phoneGatewayEnabled ? setComposerVisible : undefined}
+                        tail={<>
+                            {nativeRequest ? <NativeTerminalPanel
+                                api={props.api} sessionId={props.session.id} agent={nativeRequest.agent} nativeSessionId={nativeRequest.sessionId} machineId={props.session.metadata?.machineId}
+                            /> : null}
+                            <QueuedMessagesBar
+                                sessionId={props.session.id}
+                                api={props.api}
+                                pendingSchedule={pendingSchedule}
+                                pendingScheduleRevision={pendingScheduleRevision}
+                                onEdit={({ pendingSchedule: restored }) => {
+                                    updatePendingSchedule(restored)
+                                    setComposerVisible(true)
+                                }}
+                                canSteer={isSteeringSupportedForSession(props.session.metadata)
+                                    && (agentFlavor === 'pi' ? props.session.thinking : props.session.agentState?.steeringActive === true)
+                                    && !controlledByUser}
+                            />
+                        </>}
                     />
                     </div>
 
-                    <div className={outlineOpen ? 'max-sm:hidden' : undefined}>
+                    <ComposerReveal ref={composerRevealRef}>
+                    <div data-testid="chat-composer-container" className={outlineOpen ? 'max-sm:hidden' : undefined}>
                         {codexCollaborationModeSupported && codexModelsState.error ? (
                             <div className="px-3 pb-2">
                                 <div className="mx-auto w-full max-w-content rounded-md bg-[var(--app-subtle-bg)] p-3 text-sm text-red-600">
@@ -2029,37 +2135,22 @@ function SessionChatInner(props: SessionChatProps) {
                                     disabled={props.isSending || isScratchlistParking}
                                 />
                             ) : null}
-                            <QueuedMessagesBar
-                                sessionId={props.session.id}
-                                api={props.api}
-                                pendingSchedule={pendingSchedule}
-                                pendingScheduleRevision={pendingScheduleRevision}
-                                onEdit={({ pendingSchedule: restored }) => {
-                                    // Restore the schedule so the clock button re-activates
-                                    updatePendingSchedule(restored)
-                                }}
-                                canSteer={isSteeringSupportedForSession(props.session.metadata)
-                                    && (agentFlavor === 'pi'
-                                        ? props.session.thinking
-                                        : props.session.agentState?.steeringActive === true)
-                                    && !controlledByUser}
-                            />
                         </div>
 
                         <HappyComposer
                         focusInputRef={focusComposerRef}
                         key={`composer-${props.session.id}`}
                         sessionId={props.session.id}
-                        canRestoreAttachments={props.session.active}
+                        canRestoreAttachments={props.session.active || nativeCanCompose}
                         onUploadDraftSnapshot={(text, attachments) => {
                             uploadDraftSnapshotRef.current = { text, attachments }
                         }}
                         attachmentOrderRef={attachmentOrderRef}
                         resolveSessionMentionTooltip={resolveSessionMentionTooltip}
-                        disabled={props.isSending}
+                        disabled={props.isSending || nativeSend.isSending || (historyReadOnly && !nativeCanCompose)}
                         pendingSchedule={pendingSchedule}
                         sendAcceptance={sendAcceptance}
-                        sendSettlement={props.sendSettlement}
+                        sendSettlement={nativeCanCompose ? nativeSend.settlement : props.sendSettlement}
                         onSchedule={updatePendingSchedule}
                         onClearSchedule={() => updatePendingSchedule(null)}
                         permissionMode={props.session.permissionMode}
@@ -2114,9 +2205,15 @@ function SessionChatInner(props: SessionChatProps) {
                                 : undefined
                         }
                         active={props.session.active}
-                        allowSendWhenInactive
-                        onResumeStoredDraft={() => handleSend('', undefined, null)}
-                        thinking={props.session.thinking}
+                        historyReadOnly={historyReadOnly}
+                        nativeStatus={nativeStatus}
+                        nativeTerminalInput={nativeCanCompose}
+                        onSendNative={nativeCanCompose ? (text, attachments, intent) => handleSend(text, attachments, pendingSchedule ? Date.now() : undefined, intent).then(Boolean) : undefined}
+                        onOpenNativeModelMenu={nativeCanCompose ? () => setNativeModelOpen(true) : undefined}
+                        historySourceState={props.session.metadata?.historySourceState}
+                        allowSendWhenInactive={!historyReadOnly || nativeCanCompose}
+                        onResumeStoredDraft={async () => { await handleSend('', undefined, null) }}
+                        thinking={nativeCanCompose ? nativeTerminal.data?.busy === true : props.session.thinking}
                         agentState={props.session.agentState}
                         backgroundTaskCount={props.session.backgroundTaskCount}
                         contextSize={reduced.latestUsage?.contextSize}
@@ -2135,7 +2232,7 @@ function SessionChatInner(props: SessionChatProps) {
                                 : undefined
                         }
                         onPermissionModeChange={
-                            agentFlavor === 'copilot' && controlledByUser
+                            historyReadOnly || (agentFlavor === 'copilot' && controlledByUser)
                                 ? undefined
                                 : handlePermissionModeChange
                         }
@@ -2236,18 +2333,24 @@ function SessionChatInner(props: SessionChatProps) {
                         onParkScratchlist={onParkScratchlist}
                         onScratchlistParkingChange={setIsScratchlistParking}
                         dictateHotkeyRef={dictateHotkeyRef}
-                        sendError={props.sendError ?? null}
+                        sendError={nativeCanCompose ? nativeSend.error : props.sendError ?? null}
                         onClearSendError={handleClearSendError}
                         onSuppressSendErrorRestore={props.onSuppressSendErrorRestore}
                         pendingSendIntentRef={pendingSendIntentRef}
                         />
+                        {nativeControl.error ? <p role="alert" className="px-4 pb-2 text-sm text-red-500">{nativeControl.error}</p> : null}
                     </div>
+                    </ComposerReveal>
                     </div>
                 </DragDropZone>
             </AssistantRuntimeProvider>
             </div>
 
             {/* Voice session component - renders nothing but initializes voice backend */}
+            {phoneSlashActions.dialog}
+            {nativeRequest && <NativeModelDialog api={props.api} sessionId={props.session.id} request={nativeRequest}
+                machineId={props.session.metadata?.machineId} state={nativeTerminal.data} stale={nativeTerminal.stale}
+                open={nativeModelOpen} onOpenChange={setNativeModelOpen} />}
             {voice && (
                 <VoiceBackendSession
                     api={props.api}

@@ -94,6 +94,8 @@ describe('ReasoningGroup', () => {
     it('is collapsed by default', () => {
         const { container } = renderGroup()
         expect(isCollapsed(container)).toBe(true)
+        expect(screen.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'false')
+        expect(screen.queryByTestId('reasoning-content')).toBeNull()
     })
 
     it('expands on click', () => {
@@ -103,9 +105,14 @@ describe('ReasoningGroup', () => {
         fireEvent.click(container.querySelector('button')!)
         expect(isCollapsed(container)).toBe(false)
         expect(scroll.tabIndex).toBe(0)
+        expect(screen.getByTestId('reasoning-content')).toBeVisible()
+        expect(screen.getByRole('button', { name: 'Thinking' })).toHaveAttribute('aria-expanded', 'true')
+        fireEvent.click(screen.getByRole('button', { name: 'Thinking' }))
+        expect(screen.queryByTestId('reasoning-content')).toBeNull()
     })
 
-    it('auto-expands while streaming', () => {
+    it('auto-expands while streaming only when explicitly enabled in settings', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'false')
         const { container, rerender } = renderGroup()
         setStreaming()
         rerender(
@@ -116,8 +123,7 @@ describe('ReasoningGroup', () => {
         expect(isCollapsed(container)).toBe(false)
     })
 
-    it('stays collapsed while streaming when the preference is enabled', () => {
-        window.localStorage.setItem(STORAGE_KEY, 'true')
+    it('stays collapsed by default while new thinking streams in', () => {
         const { container, rerender } = renderGroup()
         setStreaming()
         rerender(
@@ -129,6 +135,7 @@ describe('ReasoningGroup', () => {
     })
 
     it('collapses an auto-expanded streaming block when the preference is enabled from another tab', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'false')
         const { container, rerender } = renderGroup()
         setStreaming()
         rerender(
@@ -182,6 +189,7 @@ describe('ReasoningGroup', () => {
     it('stops following new output after the user scrolls away from the bottom', () => {
         setStreaming()
         const { container, rerender } = renderGroup()
+        fireEvent.click(container.querySelector('button')!)
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         let scrollHeight = 500
         Object.defineProperties(scroll, {
@@ -201,6 +209,7 @@ describe('ReasoningGroup', () => {
     })
 
     it('releases nested scroll ownership when a scrolled-away panel is collapsed', () => {
+        window.localStorage.setItem(STORAGE_KEY, 'false')
         setStreaming()
         const { container } = renderGroup()
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
@@ -221,6 +230,7 @@ describe('ReasoningGroup', () => {
 
     it('restores follow-tail after a pointer gesture ends without scrolling', () => {
         const { container } = renderGroup()
+        fireEvent.click(container.querySelector('button')!)
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         Object.defineProperties(scroll, {
             scrollHeight: { configurable: true, value: 500 },
@@ -237,6 +247,7 @@ describe('ReasoningGroup', () => {
     it('keeps nested ownership until pointer-up while reasoning continues streaming', () => {
         setStreaming()
         const { container, rerender } = renderGroup()
+        fireEvent.click(container.querySelector('button')!)
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         let scrollHeight = 500
         Object.defineProperties(scroll, {
@@ -263,6 +274,7 @@ describe('ReasoningGroup', () => {
 
     it('restores follow-tail after a boundary wheel gesture cannot scroll', () => {
         const { container } = renderGroup()
+        fireEvent.click(container.querySelector('button')!)
         const scroll = container.querySelector('.aui-reasoning-scroll') as HTMLDivElement
         Object.defineProperties(scroll, {
             scrollHeight: { configurable: true, value: 100 },
@@ -305,7 +317,7 @@ describe('ReasoningGroup', () => {
             </ReasoningGroup>
         )
         expect(container.querySelector('.animate-pulse')).toBeInTheDocument()
-        expect(isCollapsed(container)).toBe(false)
+        expect(isCollapsed(container)).toBe(true)
     })
 })
 

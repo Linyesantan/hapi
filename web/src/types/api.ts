@@ -121,6 +121,7 @@ export type HubHealthResponse = {
     capabilities?: {
         workGraph?: boolean
         titleSuggestion?: boolean
+        phoneGateway?: boolean
     }
 }
 
@@ -226,6 +227,7 @@ export type CodexLocalSessionSummary = {
     cwd?: string | null
     file: string
     modifiedAt: number
+    sourceState?: import('@hapi/protocol/schemas').HistorySourceState
     originator?: string | null
     cliVersion?: string | null
     source?: string | null
@@ -251,6 +253,7 @@ export type PiLocalSessionSummary = {
     cwd?: string | null
     file: string
     modifiedAt: number
+    sourceState?: import('@hapi/protocol/schemas').HistorySourceState
     model?: string | null
     thinkingLevel?: string | null
     leafEntryId?: string | null
@@ -285,6 +288,19 @@ export type PiImportSessionsResponse = {
     error?: string
 }
 
+export type OpencodeLocalSessionsResponse = {
+    success: true
+    sessions: import('@hapi/protocol/apiTypes').OpencodeLocalSessionSummary[]
+    machineId: string
+} | { success: false; error: string; sessions: []; machineId?: string }
+
+export type OpencodeHistorySyncResponse = {
+    success: boolean
+    hapiSessionIds?: string[]
+    machineId?: string
+    error?: string
+}
+
 
 export type CodexArchiveSessionResponse = {
     success: true
@@ -306,6 +322,7 @@ export type CodexDesktopSyncRequest = {
     serviceTier?: string | null
     collaborationMode?: CodexCollaborationMode
     yolo?: boolean
+    readOnly?: boolean
 }
 
 export type CodexDesktopStatusResponse = {

@@ -20,6 +20,8 @@ import {
 import { isFastServiceTier } from './codexFastMode'
 import { useTranslation } from '@/lib/use-translation'
 import { useSessionHeaderMetadata } from '@/hooks/useSessionHeaderMetadata'
+import { useHistoryStatus } from '@/lib/phoneHistory'
+import type { HistorySourceState } from '@hapi/protocol/schemas'
 
 // Vibing messages for thinking state
 const VIBING_MESSAGES = [
@@ -193,6 +195,9 @@ export function shouldShowCodexFastBadge(
 
 export function StatusBar(props: {
     active: boolean
+    historyReadOnly?: boolean
+    nativeStatus?: { text: string; running: boolean }
+    historySourceState?: HistorySourceState
     thinking: boolean
     agentState: AgentState | null | undefined
     backgroundTaskCount?: number
@@ -218,9 +223,20 @@ export function StatusBar(props: {
 }) {
     const { t } = useTranslation()
     const { preferences: headerMetadata } = useSessionHeaderMetadata()
+    const historyStatus = useHistoryStatus(props.historySourceState, Boolean(props.historyReadOnly))
     const connectionStatus = useMemo(
-        () => getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
-        [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t]
+        () => props.nativeStatus ? {
+            text: props.nativeStatus.text,
+            color: props.nativeStatus.running ? 'text-[#34C759]' : 'text-[#999]',
+            dotColor: props.nativeStatus.running ? 'bg-[#34C759]' : 'bg-[#999]',
+            isPulsing: false
+        } : props.historyReadOnly ? {
+            text: historyStatus.text,
+            color: historyStatus.running ? 'text-[#34C759]' : 'text-[#999]',
+            dotColor: historyStatus.running ? 'bg-[#34C759]' : 'bg-[#999]',
+            isPulsing: false
+        } : getConnectionStatus(props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount ?? 0, t),
+        [props.active, props.thinking, props.agentState, props.voiceStatus, props.backgroundTaskCount, t, props.historyReadOnly, historyStatus.text, historyStatus.running, props.nativeStatus]
     )
 
     const contextHeuristicModel = props.contextModel ?? props.model

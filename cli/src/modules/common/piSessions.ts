@@ -3,6 +3,7 @@ import { basename, join } from 'node:path'
 import { homedir } from 'node:os'
 import { AGENT_MESSAGE_PAYLOAD_TYPE } from '@hapi/protocol'
 import { INCLUSIVE_INPUT_TOKEN_USAGE_MARKER } from '@hapi/protocol/usage'
+import { withNativeHistoryState } from './nativeHistoryState'
 import type {
     PiImportedMessage,
     PiImportedMessageContent,
@@ -452,7 +453,7 @@ export function listLocalPiSessionSummaries(limit = DEFAULT_PI_SESSION_SCAN_LIMI
         summaries.push(parsed.summary)
         if (summaries.length >= limit) break
     }
-    return summaries
+    return withNativeHistoryState(summaries, 'pi')
 }
 
 export function listLocalPiSessionsWithMessagesByIds(ids: Set<string>): PiLocalSessionWithMessages[] {
@@ -468,5 +469,5 @@ export function listLocalPiSessionsWithMessagesByIds(ids: Set<string>): PiLocalS
         sessions.push({ ...parsed.summary, messages: parsed.messages, activeEntryIds: parsed.activeEntryIds })
         if (unresolved.size === 0) break
     }
-    return sessions
+    return withNativeHistoryState(sessions, 'pi')
 }

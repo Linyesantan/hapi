@@ -999,6 +999,17 @@ describe('sendPiRpcAndWait', () => {
         expect(session.client.sendSessionEvent).not.toHaveBeenCalled();
     });
 
+    it.each(['get_entries', 'get_fork_messages'])('silently rejects the unsupported %s compatibility probe', async (command) => {
+        const handlers = new Map<string, (...args: unknown[]) => void>();
+        const { transport, reply } = recordingTransport(handlers);
+        const session = createMockSession();
+        wireTransportEvents(transport, session, []);
+        const promise = sendPiRpcAndWait(session, transport, { type: command }, 10_000);
+        reply({ command, success: false, error: `Unknown command: ${command}` });
+        await expect(promise).rejects.toThrow('Unknown command');
+        expect(session.client.sendSessionEvent).not.toHaveBeenCalled();
+    });
+
     it('get_available_models response resolves the awaited promise before timeout', async () => {
         const handlers = new Map<string, (...args: unknown[]) => void>();
         const { transport, reply } = recordingTransport(handlers);

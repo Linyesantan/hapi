@@ -1216,6 +1216,8 @@ export function SessionList(props: {
     isLoading: boolean
     renderHeader?: boolean
     headerActions?: React.ReactNode
+    extraContent?: React.ReactNode
+    leadingContent?: React.ReactNode
     api: ApiClient | null
     titleSuggestionAvailable?: boolean
     machineLabelsById?: Record<string, string>
@@ -2031,6 +2033,7 @@ export function SessionList(props: {
             ) : null}
             <div ref={scrollContainerRef} className="app-scroll-y session-list-scrollbar-left scrollbar-auto-hide min-h-0 flex-1">
             <SessionListScrollAnchor sessions={props.sessions} className="mx-auto flex w-full max-w-content flex-col gap-1 pl-1.5 pr-2 pb-2">
+                {props.leadingContent}
                 {props.sessions.length === 0 && !props.isLoading ? (
                     <SessionsEmptyState
                         onNewSession={props.onNewSession}
@@ -2117,6 +2120,7 @@ export function SessionList(props: {
                 })}
                 {groups.map(renderDirectoryGroup)}
                 {actionOnlyGroups.map(renderActionOnlyGroupHeader)}
+                {props.extraContent}
             </SessionListScrollAnchor>
             </div>
             </div>

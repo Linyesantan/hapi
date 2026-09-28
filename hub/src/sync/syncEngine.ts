@@ -8,6 +8,7 @@
  */
 
 import { isKnownFlavor, isLiveLifecycleState, isSteeringSupportedForSession, type LocalResumeTarget, type ResumableSession, type SessionEndReason } from '@hapi/protocol'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
 import {
     cliBinaryUpdatedOnDisk,
     isMachineCapabilitySkewed,
@@ -47,6 +48,7 @@ import {
     type RpcListPiModelsResponse,
     type RpcListCodexModelsResponse,
     type RpcListPiSessionsResponse,
+    type RpcListOpencodeSessionsResponse,
     type RpcArchiveCodexSessionResponse,
     type RpcListCursorModelsResponse,
     type RpcListOpencodeModelsResponse,
@@ -1066,6 +1068,9 @@ export class SyncEngine {
             deliveryMode?: MessageDeliveryMode
         }
     ): Promise<void> {
+        if (isReadOnlyHistory(this.getSession(sessionId)?.metadata)) {
+            throw new Error('这是原终端的只读记录，请在原终端继续操作')
+        }
         if (this.historyActionsInFlight.has(sessionId)) {
             throw new Error('Conversation history action already in progress')
         }
@@ -3133,6 +3138,9 @@ export class SyncEngine {
         }
 
         let initialSession = access.session
+        if (isReadOnlyHistory(initialSession.metadata)) {
+            return { type: 'error', message: '这是原终端的只读记录，请在原终端继续操作', code: 'resume_unavailable' }
+        }
         if (await this.recoverInactiveReservedClear(initialSession, namespace)) {
             initialSession = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? initialSession
         }
@@ -3594,6 +3602,9 @@ export class SyncEngine {
         }
 
         let session = access.session
+        if (isReadOnlyHistory(session.metadata)) {
+            return { type: 'error', message: '这是原终端的只读记录，请在原终端继续操作', code: 'resume_unavailable' }
+        }
         if (await this.recoverInactiveReservedClear(session, namespace)) {
             session = this.sessionCache.getSessionByNamespace(sessionId, namespace) ?? session
         }
@@ -4319,8 +4330,40 @@ export class SyncEngine {
         return await this.rpcGateway.listCodexSessionsForMachine(machineId, cwd, sessionIds)
     }
 
+    async readNativeCodexTerminal(machineId: string, sessionId: string) {
+        return await this.rpcGateway.readNativeCodexTerminal(machineId, sessionId)
+    }
+
+    async readNativeTerminal(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalRequest) {
+        return await this.rpcGateway.readNativeTerminal(machineId, request)
+    }
+
+    async sendNativeTerminalInput(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalSendRequest) {
+        return await this.rpcGateway.sendNativeTerminalInput(machineId, request)
+    }
+
+    async controlNativeModelMenu(machineId: string, request: import('@hapi/protocol/apiTypes').NativeModelRequest) {
+        return await this.rpcGateway.controlNativeModelMenu(machineId, request)
+    }
+
+    async controlNativeTerminal(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalControlRequest) {
+        return await this.rpcGateway.controlNativeTerminal(machineId, request)
+    }
+
+    async uploadNativeTerminalFile(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalUploadRequest) {
+        return await this.rpcGateway.uploadNativeTerminalFile(machineId, request)
+    }
+
+    async deleteNativeTerminalUpload(machineId: string, request: import('@hapi/protocol/apiTypes').NativeTerminalDeleteUploadRequest) {
+        return await this.rpcGateway.deleteNativeTerminalUpload(machineId, request)
+    }
+
     async listPiSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListPiSessionsResponse> {
         return await this.rpcGateway.listPiSessionsForMachine(machineId, cwd, sessionIds)
+    }
+
+    async listOpencodeSessionsForMachine(machineId: string, cwd?: string | null, sessionIds?: string[]): Promise<RpcListOpencodeSessionsResponse> {
+        return await this.rpcGateway.listOpencodeSessionsForMachine(machineId, cwd, sessionIds)
     }
 
     async archiveCodexSessionForMachine(machineId: string, sessionId: string): Promise<RpcArchiveCodexSessionResponse> {

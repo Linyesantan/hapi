@@ -11,11 +11,26 @@ import type { ClientToServerEvents, ServerToClientEvents, Update, UpdateMachineB
 import {
     ArchiveCodexSessionRpcRequestSchema,
     ListCodexSessionsRpcRequestSchema,
+    NativeCodexTerminalRequestSchema,
+    NativeTerminalRequestSchema,
+    NativeTerminalSendRequestSchema,
+    NativeModelRequestSchema,
+    NativeTerminalControlRequestSchema,
+    NativeTerminalUploadRequestSchema,
+    NativeTerminalDeleteUploadRequestSchema,
+    type NativeTerminalControlResponse,
+    type UploadFileResponse,
+    type DeleteUploadResponse,
+    type NativeModelResponse,
+    type NativeTerminalSendResponse,
+    type NativeCodexTerminalResponse,
     ListPiSessionsRpcRequestSchema,
+    ListOpencodeSessionsRpcRequestSchema,
     type ArchiveCodexSessionRpcResponse,
     type AgentAvailabilityResponse,
     type ListCodexSessionsRpcResponse,
     type ListPiSessionsRpcResponse,
+    type ListOpencodeSessionsRpcResponse,
     type MachineDirectoryEntry,
     type MachineListDirectoryResponse,
     type PathExistsResponse
@@ -58,6 +73,14 @@ import type { SpawnSessionOptions, SpawnSessionResult } from '../modules/common/
 import { applyVersionedAck } from './versionedUpdate'
 import { archiveLocalCodexSession, listLocalCodexSessionSummaries, listLocalCodexSessionsWithMessagesByIds } from '../modules/common/codexSessions'
 import { listLocalPiSessionSummaries, listLocalPiSessionsWithMessagesByIds } from '../modules/common/piSessions'
+import { listLocalOpencodeSessionSummaries, listLocalOpencodeSessionsWithMessagesByIds } from '../modules/common/opencodeSessions'
+import { readNativeCodexTerminal } from '../modules/common/nativeCodexTerminal'
+import { findRunningOpencodeTargets } from '../modules/common/nativeTerminalAccess'
+import { readNativeTerminal, sendNativeTerminalInput, drainNativeTerminalQueue } from '../modules/common/nativeTerminalInput'
+import { controlNativeModelMenu } from '../modules/common/nativeTerminalModels'
+import { controlNativeTerminal } from '../modules/common/nativeTerminalControl'
+import { uploadNativeTerminalFile, deleteNativeTerminalUpload } from '../modules/common/nativeTerminalUploads'
+import { getPhoneCurfew } from '@hapi/protocol/phoneCurfew'
 import { buildSocketIoExtraHeaderOptions } from './hubExtraHeaders'
 import { collectMachineHealth } from '@/utils/machineHealth'
 import { inspectCursorChatStore } from '@/cursor/cursorChatStoreStatus'
@@ -357,6 +380,70 @@ export class ApiMachineClient {
             }
         )
 
+        this.rpcHandlerManager.registerHandler<unknown, NativeCodexTerminalResponse>(
+            RPC_METHODS.ReadNativeCodexTerminal,
+            async (params) => {
+                const parsed = NativeCodexTerminalRequestSchema.safeParse(params)
+                if (!parsed.success) return { success: false, error: 'Invalid native Codex session' }
+                const state = await readNativeCodexTerminal(parsed.data.sessionId, {
+                    canRead: (session) => this.isLocalSessionWithinWorkspaceRoots(session)
+                })
+                return { success: true, state }
+            }
+        )
+
+        this.rpcHandlerManager.registerHandler<unknown, NativeCodexTerminalResponse>(RPC_METHODS.ReadNativeTerminal, async params => {
+            const parsed = NativeTerminalRequestSchema.safeParse(params)
+            if (!parsed.success) return { success: false, error: 'Invalid native terminal request' }
+            return { success: true, state: await readNativeTerminal(parsed.data, {
+                receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
+                canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
+            }) }
+        })
+        this.rpcHandlerManager.registerHandler<unknown, NativeTerminalSendResponse>(RPC_METHODS.SendNativeTerminalInput, async params => {
+            const parsed = NativeTerminalSendRequestSchema.safeParse(params)
+            if (!parsed.success) return { success: false, error: 'Invalid native terminal input' }
+            return sendNativeTerminalInput(parsed.data, {
+                receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
+                canSend: () => !getPhoneCurfew().restricted,
+                canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
+            })
+        })
+        this.rpcHandlerManager.registerHandler<unknown, NativeModelResponse>(RPC_METHODS.ControlNativeModelMenu, async params => {
+            const parsed = NativeModelRequestSchema.safeParse(params)
+            if (!parsed.success) return { success: false, error: 'Invalid native model action' }
+            return controlNativeModelMenu(parsed.data, {
+                receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
+                canSend: () => !getPhoneCurfew().restricted,
+                canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
+            })
+        })
+        const nativeOptions = {
+            receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
+            canSend: () => !getPhoneCurfew().restricted,
+            canRead: (session: { cwd: string; file: string }) => this.isLocalSessionWithinWorkspaceRoots(session)
+        }
+        this.rpcHandlerManager.registerHandler<unknown, NativeTerminalControlResponse>(RPC_METHODS.ControlNativeTerminal, async params => {
+            const parsed = NativeTerminalControlRequestSchema.safeParse(params)
+            return parsed.success ? controlNativeTerminal(parsed.data, nativeOptions) : { success: false, error: 'Invalid terminal control' }
+        })
+        this.rpcHandlerManager.registerHandler<unknown, UploadFileResponse>(RPC_METHODS.UploadNativeTerminalFile, async params => {
+            const parsed = NativeTerminalUploadRequestSchema.safeParse(params)
+            return parsed.success ? uploadNativeTerminalFile(parsed.data, nativeOptions) : { success: false, error: 'Invalid native attachment' }
+        })
+        this.rpcHandlerManager.registerHandler<unknown, DeleteUploadResponse>(RPC_METHODS.DeleteNativeTerminalUpload, async params => {
+            const parsed = NativeTerminalDeleteUploadRequestSchema.safeParse(params)
+            return parsed.success ? deleteNativeTerminalUpload(parsed.data, nativeOptions) : { success: false, error: 'Invalid native attachment' }
+        })
+        let draining = false
+        const nativeQueueTimer = setInterval(() => {
+            if (draining || !this.socket?.connected) return
+            draining = true
+            void drainNativeTerminalQueue(nativeOptions).catch(error => logger.debug('Native queue check failed', error))
+                .finally(() => { draining = false })
+        }, 1_500)
+        nativeQueueTimer.unref()
+
         this.rpcHandlerManager.registerHandler<unknown, ArchiveCodexSessionRpcResponse>(
             RPC_METHODS.ArchiveCodexSession,
             async (params) => {
@@ -390,6 +477,36 @@ export class ApiMachineClient {
                     if (await this.isLocalSessionWithinWorkspaceRoots(session)) sessions.push(session)
                 }
                 return { success: true, sessions }
+            }
+        )
+
+        this.rpcHandlerManager.registerHandler<unknown, ListOpencodeSessionsRpcResponse>(
+            RPC_METHODS.ListOpencodeSessions,
+            async (params) => {
+                const parsed = ListOpencodeSessionsRpcRequestSchema.safeParse(params)
+                if (!parsed.success) return { success: false, error: 'Invalid OpenCode sessions request' }
+                const rawCwd = parsed.data.cwd?.trim()
+                const cwd = rawCwd ? await this.pathPolicy.resolveForCheck(rawCwd) : null
+                if (cwd && !this.pathPolicy.isWithinSpawnRoots(cwd)) return { success: false, error: 'Path is outside workspace roots' }
+                try {
+                    const allSessions = parsed.data.sessionIds
+                        ? await listLocalOpencodeSessionsWithMessagesByIds(new Set(parsed.data.sessionIds))
+                        : await listLocalOpencodeSessionSummaries()
+                    const running = new Set((await findRunningOpencodeTargets({
+                        canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
+                    })).map(target => target.sessionId))
+                    const checkedAt = Date.now()
+                    const sessions = []
+                    for (const session of allSessions) {
+                        if (cwd && (!session.cwd || await this.pathPolicy.resolveForCheck(session.cwd) !== cwd)) continue
+                        if (await this.isLocalSessionWithinWorkspaceRoots(session)) sessions.push({ ...session,
+                            sourceState: { state: running.has(session.id) ? 'running' as const : 'unknown' as const, checkedAt }
+                        })
+                    }
+                    return { success: true, sessions }
+                } catch (error) {
+                    return { success: false, error: error instanceof Error ? error.message : 'Failed to read OpenCode history' }
+                }
             }
         )
     }

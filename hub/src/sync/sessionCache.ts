@@ -1,5 +1,6 @@
 import { SESSION_LIFECYCLE_IDLE, SESSION_LIFECYCLE_RUNNING } from '@hapi/protocol'
 import { AgentStateSchema, MetadataSchema, SessionPatchSchema, TeamStateSchema } from '@hapi/protocol/schemas'
+import { isReadOnlyHistory } from '@hapi/protocol/history'
 import type { CodexCollaborationMode, CopilotAgentMode, PermissionMode, Session, SessionPatch } from '@hapi/protocol/types'
 import type { Store } from '../store'
 import { clampAliveTime } from './aliveTime'
@@ -1654,6 +1655,7 @@ export class SessionCache {
     private extractAgentSessionId(
         metadata: NonNullable<Session['metadata']>
     ): { field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId'; value: string; dedupeKey: string; machineId?: string } | null {
+        if (isReadOnlyHistory(metadata)) return null
         const scoped = (field: 'codexSessionId' | 'claudeSessionId' | 'geminiSessionId' | 'opencodeSessionId' | 'grokSessionId' | 'cursorSessionId' | 'piSessionId' | 'agySessionId' | 'copilotSessionId', value: string) => ({
             field,
             value,
@@ -1696,7 +1698,7 @@ export class SessionCache {
 
                 const currentSession = this.sessions.get(sessionId)
                 const candidates: { id: string; session: Session }[] = []
-                if (currentSession?.metadata && currentSession.metadata[agentId.field] === agentId.value) {
+                if (currentSession?.metadata && !isReadOnlyHistory(currentSession.metadata) && currentSession.metadata[agentId.field] === agentId.value) {
                     if (agentId.field !== 'piSessionId' || currentSession.metadata.machineId === agentId.machineId) {
                         candidates.push({ id: sessionId, session: currentSession })
                     }
@@ -1704,7 +1706,7 @@ export class SessionCache {
                 for (const [existingId, existing] of this.sessions) {
                     if (existingId === sessionId) continue
                     if (existing.namespace !== session.namespace) continue
-                    if (!existing.metadata) continue
+                    if (!existing.metadata || isReadOnlyHistory(existing.metadata)) continue
                     if (existing.metadata[agentId.field] !== agentId.value) continue
                     if (agentId.field === 'piSessionId' && existing.metadata.machineId !== agentId.machineId) continue
                     candidates.push({ id: existingId, session: existing })

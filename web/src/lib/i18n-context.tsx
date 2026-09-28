@@ -26,7 +26,7 @@ function interpolate(str: string, params?: Record<string, string | number>): str
 export function I18nProvider({ children }: { children: ReactNode }) {
   const [locale, setLocaleState] = useState<Locale>(() => {
     const saved = localStorage.getItem('hapi-lang')
-    return (saved === 'en' || saved === 'zh-CN') ? saved : 'en'
+    return (saved === 'en' || saved === 'zh-CN') ? saved : navigator.language.startsWith('zh') ? 'zh-CN' : 'en'
   })
 
   const setLocale = useCallback((newLocale: Locale) => {

@@ -52,6 +52,12 @@ export const WorktreeMetadataSchema = z.object({
 
 export type WorktreeMetadata = z.infer<typeof WorktreeMetadataSchema>
 
+export const HistorySourceStateSchema = z.object({
+    state: z.enum(['running', 'unknown']),
+    checkedAt: z.number()
+})
+export type HistorySourceState = z.infer<typeof HistorySourceStateSchema>
+
 export const MetadataSchema = z.object({
     path: z.string(),
     host: z.string(),
@@ -69,6 +75,9 @@ export const MetadataSchema = z.object({
     // 原始 Codex thread id。导入 Codex 历史后，HAPI 会 fork 出自己的续写 thread；
     // codexSessionId 保存 fork 后的 thread，codexSourceSessionId 保留来源 thread 便于同步/展示。
     codexSourceSessionId: z.string().optional(),
+    codexHistoryReadOnly: z.boolean().optional(),
+    historyReadOnly: z.boolean().optional(),
+    historySourceState: HistorySourceStateSchema.optional(),
     geminiSessionId: z.string().optional(),
     opencodeSessionId: z.string().optional(),
     grokSessionId: z.string().optional(),
@@ -308,7 +317,9 @@ export const AttachmentMetadataSchema = z.object({
     mimeType: z.string(),
     size: z.number(),
     path: z.string(),
-    previewUrl: z.string().optional()
+    previewUrl: z.string().optional(),
+    previewText: z.string().optional(),
+    previewTruncated: z.boolean().optional()
 })
 
 export type AttachmentMetadata = z.infer<typeof AttachmentMetadataSchema>

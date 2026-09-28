@@ -60,6 +60,7 @@ function truncateDeep(value: unknown): unknown {
  *  not just display history. Idempotent: re-applying to already-truncated
  *  content returns the same reference. */
 export function truncateOversizedMessageContent(content: unknown): unknown {
+    if (process.env.HAPI_PRESERVE_OUTPUT === '1') return content
     if (content === null || typeof content !== 'object') return content
     if ((content as Record<string, unknown>).role !== 'agent') return content
     return truncateDeep(content)

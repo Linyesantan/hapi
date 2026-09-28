@@ -1,6 +1,6 @@
 import { afterEach, describe, expect, it } from 'bun:test'
 import { randomUUID } from 'node:crypto'
-import { mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
+import { appendFileSync, mkdtempSync, mkdirSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { Hono } from 'hono'
@@ -380,6 +380,70 @@ describe('Codex Desktop import routes', () => {
             delete process.env.CODEX_HOME
         } else {
             process.env.CODEX_HOME = originalCodexHome
+        }
+    })
+
+    it('folds native commentary into Thinking while keeping final_answer as the answer body', async () => {
+        const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-phase-test-'))
+        const store = new Store(':memory:')
+        const id = randomUUID()
+        process.env.CODEX_HOME = codexHome
+        try {
+            createTranscript(codexHome, id)
+            appendFileSync(join(codexHome, 'sessions', '2026', '06', '04', `rollout-${id}.jsonl`), [
+                { type: 'event_msg', payload: { type: 'agent_message', phase: 'commentary', message: '可见执行过程' } },
+                { type: 'response_item', payload: { type: 'message', role: 'assistant', phase: 'final_answer', content: [{ type: 'output_text', text: '最终正式答复' }] } }
+            ].map(record => JSON.stringify(record)).join('\n') + '\n')
+            const result = await importSelectedCodexSessions({ codexSessionIds: [id], store, namespace: 'default', readOnly: true })
+            expect(result.success).toBe(true)
+            const messages = store.messages.getAllMessages(result.hapiSessionIds![0])
+            expect(messages.find(message => JSON.stringify(message.content).includes('可见执行过程'))?.content).toMatchObject({ content: { data: { type: 'reasoning' } } })
+            expect(messages.find(message => JSON.stringify(message.content).includes('最终正式答复'))?.content).toMatchObject({ content: { data: { type: 'message' } } })
+        } finally { store.close(); rmSync(codexHome, { recursive: true, force: true }) }
+    })
+
+    it('只读查看独立于可执行会话，重复同步不重复消息，发送和恢复均被拒绝', async () => {
+        const codexHome = mkdtempSync(join(tmpdir(), 'hapi-codex-readonly-test-'))
+        const store = new Store(':memory:')
+        const engine = new SyncEngine(store, {} as never, new RpcRegistry(), { broadcast() {} } as never)
+        const codexSessionId = randomUUID()
+        process.env.CODEX_HOME = codexHome
+        try {
+            createTranscript(codexHome, codexSessionId)
+            const executable = await importSelectedCodexSessions({ codexSessionIds: [codexSessionId], store, namespace: 'default', getSyncEngine: () => engine })
+            const executableId = executable.hapiSessionIds![0]
+            engine.handleSessionAlive({ sid: executableId, time: Date.now() })
+            const before = store.sessions.getSessionByNamespace(executableId, 'default')
+            const options = { codexSessionIds: [codexSessionId], store, namespace: 'default', getSyncEngine: () => engine, readOnly: true }
+            const first = await importSelectedCodexSessions(options)
+            const second = await importSelectedCodexSessions(options)
+            expect(first.success).toBe(true)
+            expect(second.hapiSessionIds).toEqual(first.hapiSessionIds)
+            const readonlyId = first.hapiSessionIds![0]
+            expect(readonlyId).not.toBe(executableId)
+            expect(engine.getSession(readonlyId)?.metadata?.codexHistoryReadOnly).toBe(true)
+            expect(engine.getSession(readonlyId)?.active).toBe(false)
+            expect(store.messages.getAllMessages(readonlyId)).toHaveLength(2)
+            expect(store.sessions.getSessionByNamespace(executableId, 'default')).toEqual(before)
+            expect(engine.getSession(executableId)?.active).toBe(true)
+            expect(await engine.resumeSession(readonlyId, 'default')).toMatchObject({ type: 'error', code: 'resume_unavailable' })
+            expect(await engine.reopenSession(readonlyId, 'default')).toMatchObject({ type: 'error', code: 'resume_unavailable' })
+            await expect(engine.sendMessage(readonlyId, { text: '不能发送', localId: 'test' })).rejects.toThrow('只读')
+            expect(store.messages.getAllMessages(readonlyId)).toHaveLength(2)
+            const existingMessageIds = store.messages.getAllMessages(readonlyId).map(message => message.id)
+            appendFileSync(join(codexHome, 'sessions', '2026', '06', '04', `rollout-${codexSessionId}.jsonl`), JSON.stringify({
+                type: 'event_msg', payload: { type: 'agent_message', message: '原终端新增的中文输出' },
+            }) + '\n')
+            const refreshed = await importSelectedCodexSessions(options)
+            expect(refreshed.hapiSessionIds).toEqual([readonlyId])
+            const updatedMessages = store.messages.getAllMessages(readonlyId)
+            expect(updatedMessages).toHaveLength(3)
+            expect(updatedMessages.slice(0, 2).map(message => message.id)).toEqual(existingMessageIds)
+            expect(store.sessions.getSessionByNamespace(executableId, 'default')).toEqual(before)
+        } finally {
+            engine.stop()
+            store.close()
+            rmSync(codexHome, { recursive: true, force: true })
         }
     })
 

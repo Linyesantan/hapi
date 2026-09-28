@@ -1,15 +1,13 @@
 import { describe, expect, it } from 'vitest'
-import { getAppGlobalSseSubscription, getAppSessionSseSubscription } from './appSseSubscriptions'
+import { getAppSseSubscription } from './appSseSubscriptions'
 
 describe('app SSE subscriptions', () => {
-    it('always uses a global all:true subscription for the session list', () => {
-        expect(getAppGlobalSseSubscription()).toEqual({ all: true })
+    it('keeps global state without subscribing to every conversation body on the list page', () => {
+        expect(getAppSseSubscription(null)).toEqual({ all: true, selectedMessagesOnly: true })
+        expect(getAppSseSubscription(undefined)).toEqual({ all: true, selectedMessagesOnly: true })
     })
 
-    it('uses a session-scoped subscription only when a session is selected', () => {
-        expect(getAppSessionSseSubscription(null)).toBeNull()
-        expect(getAppSessionSseSubscription(undefined)).toBeNull()
-        expect(getAppSessionSseSubscription('')).toBeNull()
-        expect(getAppSessionSseSubscription('session-a')).toEqual({ sessionId: 'session-a' })
+    it('combines global state and the selected conversation in one stream', () => {
+        expect(getAppSseSubscription('session-a')).toEqual({ all: true, selectedMessagesOnly: true, sessionId: 'session-a' })
     })
 })
