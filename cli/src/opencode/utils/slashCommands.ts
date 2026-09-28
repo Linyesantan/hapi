@@ -1,3 +1,4 @@
+import { parseSlashCommand } from '@hapi/protocol/slashCommands';
 import { OPENCODE_PERMISSION_MODES } from '@hapi/protocol/modes';
 import type { OpencodePermissionMode } from '@hapi/protocol/types';
 import type { SlashCommand } from '@/modules/common/slashCommands';
@@ -56,12 +57,11 @@ export function resolveOpencodeSlashCommand(
         modelReasoningEffort?: string | null;
     }
 ): OpencodeSlashResolution {
-    const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text);
-    if (!match) return { kind: 'passthrough' };
+    const parsed = parseSlashCommand(text);
+    if (!parsed) return { kind: 'passthrough' };
 
-    const command = match[1]?.toLowerCase();
-    const rest = match[2]?.trim() ?? '';
-    if (!command) return { kind: 'passthrough' };
+    const command = parsed.name;
+    const rest = parsed.rest;
 
     const custom = state.commands?.find((candidate) =>
         candidate.source !== 'builtin' && candidate.name.toLowerCase() === command

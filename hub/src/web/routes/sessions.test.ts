@@ -1422,6 +1422,41 @@ describe('sessions routes', () => {
         })
     })
 
+    // A name reported as /Foo and one discovered as /foo are the same command.
+    // Keying the merge on the raw name returned both entries, so the composer
+    // menu showed a duplicate.
+    it('deduplicates slash commands case-insensitively', async () => {
+        const session = createSession({
+            metadata: {
+                path: '/tmp/project',
+                host: 'localhost',
+                flavor: 'claude',
+                slashCommands: ['Help', 'memory']
+            }
+        })
+        const { app } = createApp(session, {
+            listSlashCommands: async () => ({
+                success: true,
+                commands: [
+                    { name: 'help', source: 'builtin', description: 'Show help' },
+                    { name: 'clear', source: 'builtin' }
+                ]
+            })
+        })
+
+        const response = await app.request('/api/sessions/session-1/slash-commands')
+
+        expect(response.status).toBe(200)
+        expect(await response.json()).toEqual({
+            success: true,
+            commands: [
+                { name: 'help', source: 'builtin', description: 'Show help' },
+                { name: 'memory', source: 'builtin' },
+                { name: 'clear', source: 'builtin' }
+            ]
+        })
+    })
+
     // tiann/hapi#916: archive endpoint must be idempotent for already-archived
     // rows and for split-brain rows whose CLI is gone but the in-memory `active`
     // flag has not been reconciled to false yet.

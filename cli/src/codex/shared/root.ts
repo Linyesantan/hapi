@@ -548,8 +548,20 @@ export class SharedCodexRoot {
                 : await this.client.request('thread/goal/set', { ...params, ...(slash.action === 'set' ? { objective: slash.objective } : { status: slash.action === 'pause' ? 'paused' : 'active' }) });
             this.notice(JSON.stringify(response)); return null;
         }
-        if (slash.updates?.proactiveMultiAgent !== undefined) throw new Error('This Codex version uses Ultra reasoning effort instead of a multi-agent toggle');
-        if (slash.updates?.model === null) throw new Error('Choose an explicit model in a shared thread');
+        // A slash command that cannot mutate anything must NOT throw here.
+        // queue.command() marks the message `uncertain` on any throw (see
+        // queue.ts), which surfaces to the user as "Message not confirmed ...
+        // Inspect the queue before retrying" and makes a retry replay the entry.
+        // Neither of these settings exists on a shared thread, so report the
+        // limitation as a notice and return null to acknowledge the message.
+        if (slash.updates?.proactiveMultiAgent !== undefined) {
+            this.notice('A shared Codex session cannot toggle multi-agent mode: this Codex build uses Ultra reasoning effort instead. Switch sub-threads from the original Codex terminal.');
+            return null;
+        }
+        if (slash.updates?.model === null) {
+            this.notice(`A shared Codex session keeps the model chosen when the thread started, so it cannot be switched to auto mid-thread. Start a new session to pick another model.`);
+            return null;
+        }
         if (slash.updates) await this.applySettings(slash.updates);
         if (slash.message) this.notice(slash.message);
         return slash.kind === 'replace' ? slash.text : null;

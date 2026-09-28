@@ -3,6 +3,8 @@ import { mkdir, mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 import { listSlashCommands } from './slashCommands'
+import { getBuiltinSlashCommands } from '@hapi/protocol/slashCommands'
+import { CURSOR_PASS_THROUGH_COMMANDS_WITH_ARGS } from '../../cursor/cursorSpecialCommands'
 
 describe('listSlashCommands', () => {
     const originalClaudeConfigDir = process.env.CLAUDE_CONFIG_DIR
@@ -307,5 +309,36 @@ describe('listSlashCommands', () => {
         expect(names).not.toContain('fix-issue')
         expect(commands.find((command) => command.name === 'rubber-duck')?.source).toBe('builtin')
         expect(commands.find((command) => command.name === 'plan')?.source).toBe('builtin')
+    })
+
+    // The catalog is hand-maintained in shared/src/slashCommands.ts while the
+    // resolvers own the real command list. These two guards fail loudly if the
+    // two drift again: a command that is implemented but unlisted is
+    // undiscoverable, and a listed command with no implementation gets sent to
+    // the model as literal text.
+    it('keeps the Cursor catalog in sync with the pass-through command list', () => {
+        const catalog = getBuiltinSlashCommands('cursor').map((command) => command.name)
+
+        for (const command of CURSOR_PASS_THROUGH_COMMANDS_WITH_ARGS) {
+            expect(catalog).toContain(command)
+        }
+        expect([...catalog].sort()).toEqual([...CURSOR_PASS_THROUGH_COMMANDS_WITH_ARGS].sort())
+    })
+
+    it('lists every copilot command the resolver handles locally', () => {
+        const catalog = getBuiltinSlashCommands('copilot').map((command) => command.name)
+        const handled = ['help', 'status', 'model', 'permissions', 'permission', 'plan',
+            'autopilot', 'fleet', 'interactive', 'default', 'mode']
+
+        for (const command of handled) {
+            expect(catalog).toContain(command)
+        }
+    })
+
+    it('does not advertise a /agent command for shared codex sessions', () => {
+        // The catalog keeps /agent because the legacy per-session launcher
+        // supports it; the web filters it per session. See
+        // isSlashCommandUnavailable in shared/src/slashCommands.ts.
+        expect(getBuiltinSlashCommands('codex').map((command) => command.name)).toContain('agent')
     })
 })

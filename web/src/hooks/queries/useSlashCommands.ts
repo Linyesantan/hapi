@@ -4,7 +4,7 @@ import type { ApiClient } from '@/api/client'
 import type { SlashCommand } from '@/types/api'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
 import { queryKeys } from '@/lib/query-keys'
-import { getBuiltinSlashCommands, mergeSlashCommands } from '@/lib/codexSlashCommands'
+import { getBuiltinSlashCommands, mergeSlashCommands, filterUnavailableSlashCommands } from '@/lib/codexSlashCommands'
 import { getPhoneSlashCommands, isPhoneCli } from '@/lib/phoneSlashCommands'
 
 function levenshteinDistance(a: string, b: string): number {
@@ -61,16 +61,20 @@ export function useSlashCommands(
     // keep local built-ins as an offline fallback, then append/override from RPC.
     const commands = useMemo(() => {
         if (options.unified && isPhoneCli(agentType)) {
+            // getPhoneSlashCommands already handles sharedCodex: it drops the
+            // builtin and keeps the entry as a "run this in the original
+            // terminal" hint, which is more useful than hiding it. Filtering
+            // again here by name deleted that hint entirely.
             return getPhoneSlashCommands(agentType, query.data?.success ? query.data.commands : [], options.sharedCodex)
         }
+        // This branch merges the raw builtin catalog, which still lists /agent
+        // for codex. Without the filter a shared Codex session advertised a
+        // command its runtime cannot execute, so drop it here.
         const builtin = getBuiltinSlashCommands(agentType)
-
-        if (query.data?.success && query.data.commands) {
-            return mergeSlashCommands([...builtin, ...query.data.commands])
-        }
-
-        // Fallback to built-in commands only
-        return builtin
+        const merged = query.data?.success && query.data.commands
+            ? mergeSlashCommands([...builtin, ...query.data.commands])
+            : builtin
+        return filterUnavailableSlashCommands(merged, agentType, { sharedCodex: options.sharedCodex })
     }, [agentType, query.data, options.unified, options.sharedCodex])
 
     const getSuggestions = useCallback(async (queryText: string): Promise<Suggestion[]> => {

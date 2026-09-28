@@ -61,6 +61,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
     const updateState = vi.fn((fn: (value: AgentState) => AgentState) => { state = fn(state); });
     const rpc = new Map<string, (raw: unknown) => Promise<unknown>>();
     const send = vi.fn();
+    const sessionEvent = vi.fn();
     const hubArchivedListeners: Array<() => void> = [];
     const session = {
         sessionId: 'sid', getMetadata: () => metadata,
@@ -73,7 +74,7 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
             if (event === 'hub-archived') hubArchivedListeners.push(listener);
         },
         rpcHandlerManager: { registerHandler: (name: string, handler: (raw: unknown) => Promise<unknown>) => rpc.set(name, handler) },
-        sendSessionEvent() {}, sendAgentMessage: send, emitSessionReady() {},
+        sendSessionEvent: sessionEvent, sendAgentMessage: send, emitSessionReady() {},
         sendUserMessage() {}, emitMessagesConsumed() {}, emitSteerIndeterminate() {}, syncNativeQueuedMessage() {},
         sendSessionDeath() {}, async flush() {}, close() {}
     } as unknown as ApiSessionClient;
@@ -88,13 +89,14 @@ async function fixture(opts?: { hubArchived?: boolean; end?: RootHost['end'] }) 
     await root.bind('thread', { model: 'mock', thread: { turns: [] } }, false);
     const native = root.client as unknown as {
         initialized: boolean;
+        settings: Record<string, unknown>;
         thread: { id: string; turns: NativeTurn[] };
         queue: Array<{ id: string; clientUserMessageId: string; input: unknown }>;
         notify(method: string, params: unknown): void;
         abandoned(): void;
     };
     return {
-        root, native, rpc, send, metadata: () => metadata, state: () => state, updateState,
+        root, native, rpc, send, sessionEvent, metadata: () => metadata, state: () => state, updateState,
         reconnect: () => reconnect?.(),
         emitHubArchived: () => { for (const listener of hubArchivedListeners) listener(); },
         hubArchivedListenerCount: () => hubArchivedListeners.length,
@@ -114,6 +116,59 @@ async function completePlan(f: Awaited<ReturnType<typeof fixture>>, status = 'co
     await vi.waitFor(() => expect(f.send).toHaveBeenCalledWith(expect.objectContaining({ name: 'ExitPlanMode' }), expect.any(String)));
     return codexPlanProposalId('thread', turn.id, 'plan-item');
 }
+
+describe('shared slash command limits', () => {
+    // queue.command() marks a message `uncertain` on ANY throw, which surfaces as
+    // "Message not confirmed ... Inspect the queue before retrying" and can replay
+    // the entry on retry. A command that mutates nothing must resolve to null
+    // (acknowledged) with a notice instead.
+    const runCommand = (root: SharedCodexRoot, text: string) =>
+        (root as unknown as { command(value: string): Promise<string | null> }).command(text);
+
+    it('reports /agent as unavailable instead of throwing', async () => {
+        const f = await fixture();
+
+        await expect(runCommand(f.root, '/agent off')).resolves.toBeNull();
+        expect(f.sessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'message',
+            message: expect.stringContaining('cannot toggle multi-agent mode')
+        }));
+    });
+
+    it('reports /agent status without throwing', async () => {
+        const f = await fixture();
+
+        await expect(runCommand(f.root, '/agent status')).resolves.toBeNull();
+        expect(f.sessionEvent).toHaveBeenCalled();
+    });
+
+    it('reports /model auto as unavailable instead of throwing', async () => {
+        const f = await fixture();
+
+        await expect(runCommand(f.root, '/model auto')).resolves.toBeNull();
+        expect(f.sessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'message',
+            message: expect.stringContaining('cannot be switched to auto mid-thread')
+        }));
+    });
+
+    it('still applies settings for commands the shared thread does support', async () => {
+        const f = await fixture();
+
+        await expect(runCommand(f.root, '/permissions yolo')).resolves.toBeNull();
+        await vi.waitFor(() => expect(f.native.settings).toMatchObject({ approvalPolicy: 'never' }));
+    });
+
+    it('reports unsupported codex builtins rather than passing them to the model', async () => {
+        const f = await fixture();
+
+        await expect(runCommand(f.root, '/mcp')).resolves.toBeNull();
+        expect(f.sessionEvent).toHaveBeenCalledWith(expect.objectContaining({
+            type: 'message',
+            message: expect.stringContaining('not supported in HAPI sessions yet')
+        }));
+    });
+});
 
 describe('shared plan actions', () => {
     it('applies remote change_title as metadata.name then lets native terminal rename win', async () => {

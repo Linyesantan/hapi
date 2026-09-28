@@ -1,4 +1,4 @@
-import { getBuiltinSlashCommands } from '@hapi/protocol/slashCommands'
+import { getBuiltinSlashCommands, isSlashCommandUnavailable, parseSlashCommand } from '@hapi/protocol/slashCommands'
 import type { SlashCommand } from '@/types/api'
 
 export const PHONE_CLIS = ['codex', 'opencode', 'pi'] as const
@@ -77,7 +77,7 @@ export function getPhoneSlashCommands(agent: string, discovered: readonly SlashC
     for (const cli of PHONE_CLIS) {
         for (const [name, description] of Object.entries(terminalCommands[cli])) add(name, cli, description, true)
         for (const command of getBuiltinSlashCommands(cli)) {
-            if (cli === 'codex' && command.name === 'agent' && sharedCodex) continue
+            if (isSlashCommandUnavailable(command.name, cli, { sharedCodex })) continue
             add(command.name, cli, command.description ?? command.name)
         }
     }
@@ -128,16 +128,16 @@ export type PhoneSlashResolution =
     | { kind: 'notice'; name: string; message: string }
 
 export function resolvePhoneSlashCommand(text: string, agent: string, available: readonly SlashCommand[], sharedCodex = false): PhoneSlashResolution {
-    const match = /^\s*\/([a-z0-9:_-]+)(?:\s+([\s\S]*))?$/i.exec(text)
-    if (!match || !isPhoneCli(agent)) return { kind: 'passthrough' }
-    const name = match[1].toLowerCase()
-    const args = match[2]?.trim() ?? ''
+    const parsed = parseSlashCommand(text)
+    if (!parsed || !isPhoneCli(agent)) return { kind: 'passthrough' }
+    const name = parsed.name
+    const args = parsed.rest
     // 当前 CLI 的项目 / 用户 / 扩展命令优先，包括与内置命令同名的覆盖。
     if (available.some(command => command.name.toLowerCase() === name && command.source !== 'builtin')) return { kind: 'passthrough' }
     const gateway = gatewayCommands.find(command => command.name === name)
     if (gateway && (!gateway.agents || gateway.agents.includes(agent))) return { kind: 'gateway', action: gateway.action, name, args }
     if (name === 'summarize' && agent === 'opencode') return { kind: 'passthrough', text: args ? `/compact ${args}` : '/compact' }
-    if (!(sharedCodex && agent === 'codex' && name === 'agent')
+    if (!isSlashCommandUnavailable(name, agent, { sharedCodex })
         && getBuiltinSlashCommands(agent).some(command => command.name === name)) return { kind: 'passthrough' }
     if (terminalCommands[agent][name]) {
         return { kind: 'notice', name, message: `${PHONE_CLI_LABELS[agent]} 的 /${name} 需要在原 CLI 终端执行。${terminalCommands[agent][name]}。网关不会把这条命令当作普通问题发送。` }

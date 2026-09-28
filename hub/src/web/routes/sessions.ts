@@ -51,13 +51,23 @@ function commandsFromMetadataSlashCommands(names: readonly string[] | undefined)
         }))
 }
 
+/**
+ * Merge the RPC-discovered commands over the bare names captured in session
+ * metadata. Dedupe is case-insensitive, matching shared's mergeSlashCommands
+ * and the Android companion: a name reported as `/Foo` and one discovered as
+ * `/foo` are the same command, and keying on the raw name returned both.
+ *
+ * Unlike shared, an override keeps the position of its first occurrence rather
+ * than moving to the end, so a session's own command order stays stable when
+ * the CLI later describes the same command.
+ */
 function mergeSlashCommands(
     primary: readonly SlashCommand[],
     fallback: readonly SlashCommand[]
 ): SlashCommand[] {
     const commandMap = new Map<string, SlashCommand>()
     for (const command of [...fallback, ...primary]) {
-        commandMap.set(command.name, command)
+        commandMap.set(command.name.toLowerCase(), command)
     }
     return Array.from(commandMap.values())
 }
