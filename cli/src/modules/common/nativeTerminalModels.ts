@@ -14,7 +14,6 @@ const RecordSchema = z.object({
 const keys = { up: 'Up', down: 'Down', confirm: 'Enter', cancel: 'Escape' } as const
 
 async function act(request: NativeModelRequest, options: NativeTerminalInputOptions): Promise<NativeModelResponse> {
-    if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁期间暂停模型选择。' }
     const key = createHash('sha256').update(`${request.agent}\0${request.sessionId}`).digest('hex')
     const directory = join(options.receiptsDir, key, 'models')
     const path = join(directory, `${request.requestId}.json`)
@@ -47,7 +46,6 @@ async function act(request: NativeModelRequest, options: NativeTerminalInputOpti
         || (request.action === 'open' ? !snapshot.state.input?.available : snapshot.state.modelMenu?.fingerprint !== expected)) {
         return { success: false, error: '原终端状态已变化，未发送模型操作。' }
     }
-    if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁已开始，模型操作未发送。' }
     const record: z.infer<typeof RecordSchema> = { request, cwd: target.cwd, file: target.file, status: 'indeterminate' }
     mkdirSync(directory, { recursive: true, mode: 0o700 })
     saveNativeTerminalRecord(path, record, true)
@@ -78,7 +76,7 @@ async function act(request: NativeModelRequest, options: NativeTerminalInputOpti
                 let visible = false
                 for (let attempt = 0; attempt < 25; attempt++) {
                     snapshot = await readNativeTerminalSnapshot(request, options)
-                    if (!snapshot.target || snapshot.target.binding !== target.binding || options.canSend && !options.canSend()) break
+                    if (!snapshot.target || snapshot.target.binding !== target.binding) break
                     if (snapshot.state.modelMenu) { record.status = 'submitted'; break }
                     const matches = nativeComposerText(snapshot.target, snapshot.raw) === '/models'
                     if (matches && visible) {

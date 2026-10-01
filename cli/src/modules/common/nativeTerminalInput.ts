@@ -5,7 +5,7 @@ import { NativeTerminalReceiptSchema, NativeTerminalSendRequestSchema, type Nati
 import { nativeComposerText, nativeTmuxCondition, readNativeTerminalSnapshot, runNativeTmux, type NativeTerminalOptions, type NativeTerminalTarget } from './nativeTerminalAccess'
 import { validateNativeAttachments } from './nativeTerminalUploads'
 
-export type NativeTerminalInputOptions = NativeTerminalOptions & { receiptsDir: string; canSend?: () => boolean }
+export type NativeTerminalInputOptions = NativeTerminalOptions & { receiptsDir: string }
 type Options = NativeTerminalInputOptions
 export type NativeTerminalRecord = NativeTerminalReceipt & NativeTerminalRequest & {
     binding: string; file: string; cwd: string; offset: number; wireText?: string; imagePaths?: string[]; immediate?: boolean
@@ -121,7 +121,6 @@ export async function readNativeTerminal(request: NativeTerminalRequest, options
 }
 
 async function send(request: NativeTerminalSendRequest, options: Options): Promise<NativeTerminalSendResponse> {
-    if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁期间暂停手机终端输入。' }
     const path = pathFor(request, options)
     const previous = readRecord(path)
     if (previous) {
@@ -170,7 +169,6 @@ export async function deliverNativeTerminalRecord(record: RecordEntry, options: 
     await run(['-S', target.socket, 'load-buffer', '-b', buffer, '-'], record.wireText ?? record.text)
     try {
         snapshot = await readNativeTerminalSnapshot(request, options)
-        if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁已开始，消息未发送，草稿已保留。' }
         if (!snapshot.target || snapshot.target.binding !== request.binding || !snapshot.state.input?.available) {
             return { success: false, error: snapshot.state.input?.reason ?? '原终端的输入状态已变化，请重试。' }
         }
@@ -213,7 +211,7 @@ export async function deliverNativeTerminalRecord(record: RecordEntry, options: 
                 if (separateSubmit) {
                     await new Promise(resolve => setTimeout(resolve, 160))
                     const ready = await readNativeTerminalSnapshot(record, options)
-                    if (!ready.target || ready.target.binding !== record.binding || ready.state.modelMenu || options.canSend && !options.canSend()) throw new Error('Terminal changed before submit')
+                    if (!ready.target || ready.target.binding !== record.binding || ready.state.modelMenu) throw new Error('Terminal changed before submit')
                     const entered = await run(['-S', target.socket, 'if-shell', '-F', '-t', target.pane, condition,
                         `send-keys -t ${target.pane} Enter ; display-message -p HAPI_INPUT_SENT`, 'display-message -p HAPI_INPUT_REJECTED'])
                     if (entered.trim() !== 'HAPI_INPUT_SENT') throw new Error('Submit not confirmed')
@@ -231,7 +229,6 @@ export async function deliverNativeTerminalRecord(record: RecordEntry, options: 
 }
 
 export async function drainNativeTerminalQueue(options: Options): Promise<void> {
-    if (options.canSend && !options.canSend()) return
     let directories: string[]
     try { directories = readdirSync(options.receiptsDir).filter(name => /^[a-f0-9]{64}$/.test(name)) } catch { return }
     for (const directory of directories) {

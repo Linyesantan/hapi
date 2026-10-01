@@ -2,7 +2,6 @@ import { useQuery, useQueryClient } from '@tanstack/react-query'
 import { useCallback, useRef, useState } from 'react'
 import { NativeTerminalInputSchema, type NativeTerminalInput, type NativeTerminalRequest } from '@hapi/protocol/apiTypes'
 import type { AttachmentMetadata } from '@/types/api'
-import { getPhoneCurfew } from '@hapi/protocol/phoneCurfew'
 import type { ApiClient } from '@/api/client'
 import type { ComposerSendError } from '@/components/AssistantChat/HappyComposer'
 import type { SendMessageSettlement } from '@/hooks/mutations/useSendMessage'
@@ -24,7 +23,7 @@ export function useNativeTerminal(api: ApiClient | null, request: NativeTerminal
         refetchInterval: 2_000, staleTime: 1_000, retry: false
     })
     const stale = !online || Boolean(query.error) || !query.data || Date.now() - query.data.checkedAt > 10_000
-    return { ...query, stale, canSend: !stale && Boolean(query.data?.input?.available) && !getPhoneCurfew().restricted }
+    return { ...query, stale, canSend: !stale && Boolean(query.data?.input?.available) }
 }
 
 /** An uncertain request keeps its ID across remounts and network retries. */
@@ -44,7 +43,6 @@ export function useNativeTerminalSend(api: ApiClient, sessionId: string) {
         setError(null)
         let input: NativeTerminalInput | undefined
         try {
-            if (getPhoneCurfew().restricted) throw new Error(getPhoneCurfew().message)
             if (!navigator.onLine) throw new Error('当前离线，草稿已保留；联网后点击发送。')
             if (!pending.current) {
                 try {

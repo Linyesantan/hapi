@@ -1,7 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { NativeModelActionSchema, type NativeModelAction, type NativeModelMenu, type NativeCodexTerminalState, type NativeTerminalRequest } from '@hapi/protocol/apiTypes'
-import { getPhoneCurfew } from '@hapi/protocol/phoneCurfew'
 import type { ApiClient } from '@/api/client'
 import { queryKeys } from '@/lib/query-keys'
 import { apiErrorMessage } from '@/lib/apiErrorMessage'
@@ -43,13 +42,12 @@ export function NativeModelDialog(props: {
     const storageKey = `hapi.native-model.v1.${props.sessionId}`
     const queryKey = queryKeys.nativeTerminal(props.request.agent, props.request.sessionId, props.machineId)
     const menu = props.state?.modelMenu
-    const unavailable = props.stale || getPhoneCurfew().restricted
+    const unavailable = props.stale
 
     const perform = useCallback(async (action: NativeModelAction['action'], retry = false) => {
         if (busyRef.current) return
         busyRef.current = true; setBusy(true); setError(null)
         try {
-            if (getPhoneCurfew().restricted) throw new Error(getPhoneCurfew().message)
             if (props.stale) throw new Error('原终端暂未连接，恢复连接后再选择模型。')
             if (!pendingRef.current) {
                 const saved = NativeModelActionSchema.safeParse(JSON.parse(localStorage.getItem(storageKey) ?? 'null'))
@@ -109,8 +107,7 @@ export function NativeModelDialog(props: {
                 <DialogDescription>{props.request.agent === 'codex' ? 'Codex' : 'OpenCode'} 原会话的可用选项；上下选择后确认。</DialogDescription>
             </DialogHeader>
             <div className="mt-3 space-y-3">
-                {menu ? <MenuScreen menu={menu} /> : <p className="text-sm text-[var(--app-hint)]">{getPhoneCurfew().restricted
-                    ? getPhoneCurfew().message : busy ? '正在打开原终端模型菜单…' : props.state?.input?.reason ?? '正在连接原终端…'}</p>}
+                {menu ? <MenuScreen menu={menu} /> : <p className="text-sm text-[var(--app-hint)]">{busy ? '正在打开原终端模型菜单…' : props.state?.input?.reason ?? '正在连接原终端…'}</p>}
                 {error ? <p role="alert" className="text-sm text-[var(--app-warning)]">{error}</p> : null}
                 {uncertain ? <div className="flex flex-wrap gap-2">
                     <button type="button" className={buttonClass} disabled={busy || unavailable} onClick={() => void perform('open', true)}>核对上次操作</button>

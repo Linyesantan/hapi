@@ -74,7 +74,6 @@ export function isConnectionFailure(error: unknown): boolean {
     if (error instanceof TypeError) return true // fetch network failure
     if (error instanceof Error && ['TimeoutError', 'AbortError'].includes(error.name)) return true
     const status = (error as { status?: unknown } | null)?.status
-    if (status === 423 && (error as { code?: unknown }).code === 'ssh_curfew') return true
     return status === 502 || status === 503 || status === 504
 }
 

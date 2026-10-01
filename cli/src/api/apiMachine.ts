@@ -80,7 +80,6 @@ import { readNativeTerminal, sendNativeTerminalInput, drainNativeTerminalQueue }
 import { controlNativeModelMenu } from '../modules/common/nativeTerminalModels'
 import { controlNativeTerminal } from '../modules/common/nativeTerminalControl'
 import { uploadNativeTerminalFile, deleteNativeTerminalUpload } from '../modules/common/nativeTerminalUploads'
-import { getPhoneCurfew } from '@hapi/protocol/phoneCurfew'
 import { buildSocketIoExtraHeaderOptions } from './hubExtraHeaders'
 import { collectMachineHealth } from '@/utils/machineHealth'
 import { inspectCursorChatStore } from '@/cursor/cursorChatStoreStatus'
@@ -405,7 +404,6 @@ export class ApiMachineClient {
             if (!parsed.success) return { success: false, error: 'Invalid native terminal input' }
             return sendNativeTerminalInput(parsed.data, {
                 receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
-                canSend: () => !getPhoneCurfew().restricted,
                 canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
             })
         })
@@ -414,13 +412,11 @@ export class ApiMachineClient {
             if (!parsed.success) return { success: false, error: 'Invalid native model action' }
             return controlNativeModelMenu(parsed.data, {
                 receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
-                canSend: () => !getPhoneCurfew().restricted,
                 canRead: session => this.isLocalSessionWithinWorkspaceRoots(session)
             })
         })
         const nativeOptions = {
             receiptsDir: join(configuration.happyHomeDir, 'native-terminal-input'),
-            canSend: () => !getPhoneCurfew().restricted,
             canRead: (session: { cwd: string; file: string }) => this.isLocalSessionWithinWorkspaceRoots(session)
         }
         this.rpcHandlerManager.registerHandler<unknown, NativeTerminalControlResponse>(RPC_METHODS.ControlNativeTerminal, async params => {

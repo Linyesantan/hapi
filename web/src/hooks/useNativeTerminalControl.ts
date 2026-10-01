@@ -1,7 +1,6 @@
 import { useCallback, useRef, useState } from 'react'
 import { useQueryClient } from '@tanstack/react-query'
 import { NativeTerminalControlSchema, type NativeTerminalControl } from '@hapi/protocol/apiTypes'
-import { getPhoneCurfew } from '@hapi/protocol/phoneCurfew'
 import type { ApiClient } from '@/api/client'
 import { apiErrorMessage } from '@/lib/apiErrorMessage'
 
@@ -16,7 +15,6 @@ export function useNativeTerminalControl(api: ApiClient | null, sessionId?: stri
         busy.current = true; setIsPending(true); setError(null)
         const storageKey = `hapi.native-control.v1.${sessionId}`
         try {
-            if (getPhoneCurfew().restricted) throw new Error(getPhoneCurfew().message)
             if (!navigator.onLine || !binding) throw new Error('原终端暂未连接，请恢复连接后再试。')
             if (!pending.current) {
                 const saved = NativeTerminalControlSchema.safeParse(JSON.parse(localStorage.getItem(storageKey) ?? 'null'))

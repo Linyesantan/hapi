@@ -128,7 +128,7 @@ describe('向原生终端可靠发送', () => {
         expect(await sendNativeTerminalInput(input, f.options)).toMatchObject({ receipt: { status: 'cancelled' } })
         expect(f.run.mock.calls.some(([args]) => args.includes('load-buffer') || args.includes('if-shell'))).toBe(false)
     })
-    it('立即发送只打断一次并优先投递选中的消息；后台队列遵守宵禁', async () => {
+    it('立即发送只打断一次并优先投递选中的消息', async () => {
         const f = fixture()
         f.setScreen(f.raw.replace('工作中', 'Working (esc to interrupt)'))
         const binding = (await readNativeTerminalSnapshot(f.request, f.options)).state.input!.binding!
@@ -142,8 +142,6 @@ describe('向原生终端可靠发送', () => {
         })
         const action = { ...f.request, binding, requestId: randomUUID(), action: 'send-now' as const, messageId: second.requestId }
         await controlNativeTerminal(action, f.options); await controlNativeTerminal(action, f.options)
-        await drainNativeTerminalQueue({ ...f.options, canSend: () => false })
-        expect(f.run.mock.calls.filter(([args]) => args.includes('load-buffer'))).toHaveLength(0)
         await drainNativeTerminalQueue(f.options)
         expect(f.run.mock.calls.filter(([args]) => args.some(arg => arg.includes('send-keys') && arg.includes('Escape')))).toHaveLength(1)
         expect(f.run.mock.calls.find(([args]) => args.includes('load-buffer'))?.[1]).toBe(second.text)

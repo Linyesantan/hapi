@@ -46,13 +46,9 @@ describe('手机向原终端发送', () => {
         expect(send.mock.calls[2][1].requestId).toBe(send.mock.calls[1][1].requestId)
         expect(hook.result.current.error?.text).toBe('中文输入')
     })
-    it('宵禁或本地离线不会提交，保留用户文字', async () => {
+    it('本地离线不会提交，保留用户文字', async () => {
         const send = vi.fn()
         const hook = setup(send)
-        vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-15T01:00:00+08:00'))
-        await act(() => hook.result.current.send('宵禁草稿', binding))
-        expect(hook.result.current.error?.message).toContain('SSH 宵禁')
-        vi.spyOn(Date, 'now').mockReturnValue(Date.parse('2026-09-15T12:00:00+08:00'))
         vi.spyOn(navigator, 'onLine', 'get').mockReturnValue(false)
         await act(() => hook.result.current.send('离线草稿', binding))
         expect(hook.result.current.error?.text).toBe('离线草稿')

@@ -39,7 +39,6 @@ export async function uploadNativeTerminalFile(input: NativeTerminalUploadReques
     const parsed = NativeTerminalUploadRequestSchema.safeParse(input)
     if (!parsed.success) return { success: false, error: '无效的附件。' }
     const request = parsed.data
-    if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁期间暂停上传。' }
     const { target } = await resolveNativeTerminal(request, options)
     if (!target) return { success: false, error: '原终端暂未连接，请恢复连接后重试上传。' }
     try {
@@ -65,7 +64,6 @@ export async function uploadNativeTerminalFile(input: NativeTerminalUploadReques
 export async function deleteNativeTerminalUpload(input: NativeTerminalDeleteUploadRequest, options: NativeTerminalInputOptions): Promise<DeleteUploadResponse> {
     const parsed = NativeTerminalDeleteUploadRequestSchema.safeParse(input)
     if (!parsed.success) return { success: false, error: '无效的附件。' }
-    if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁期间暂停附件操作。' }
     const { target } = await resolveNativeTerminal(parsed.data, options)
     if (!target) return { success: false, error: '原终端暂未连接。' }
     try {

@@ -158,7 +158,7 @@ export class ApiError extends Error {
     body?: string
 
     constructor(message: string, status: number, code?: string, body?: string) {
-        super(code === 'ssh_curfew' ? 'SSH 宵禁：北京时间周一至周五 00:30–06:00 暂停网关连接和操作；已缓存记录仍可离线查看。' : message)
+        super(message)
         this.name = 'ApiError'
         this.status = status
         this.code = code

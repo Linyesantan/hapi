@@ -47,9 +47,8 @@ describe('原终端模型菜单', () => {
         expect(args).not.toContain('paste-buffer')
         expect(await controlNativeModelMenu({ ...f.open, action: 'cancel', fingerprint: '0'.repeat(64) }, f.options)).toMatchObject({ success: false })
     })
-    it('菜单变化、草稿、错误绑定、宵禁和非法按键均不能投递', async () => {
+    it('菜单变化、草稿、错误绑定和非法按键均不能投递', async () => {
         const f = fixture()
-        expect(await controlNativeModelMenu(f.open, { ...f.options, canSend: () => false })).toMatchObject({ success: false })
         expect(await controlNativeModelMenu({ ...f.open, binding: 'b'.repeat(64) }, f.options)).toMatchObject({ success: false })
         expect(await controlNativeModelMenu({ ...f.open, action: 'C-c' as never }, f.options)).toMatchObject({ success: false })
         f.state().input!.available = false

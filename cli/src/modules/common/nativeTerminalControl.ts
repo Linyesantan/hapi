@@ -10,7 +10,6 @@ export async function controlNativeTerminal(input: NativeTerminalControlRequest,
     if (!parsed.success) return { success: false, error: '无效的终端操作。' }
     const request = parsed.data
     return withNativeTerminalLock(request, options, async () => {
-        if (options.canSend && !options.canSend()) return { success: false, error: 'SSH 宵禁期间暂停终端操作。' }
         const directory = nativeTerminalDirectory(request, options)
         const actionPath = join(directory, 'controls', `${request.requestId}.json`)
         type ActionRecord = { request: NativeTerminalControlRequest; status: 'submitted' | 'indeterminate' | 'rejected'; cwd: string; file: string }
@@ -49,7 +48,7 @@ export async function controlNativeTerminal(input: NativeTerminalControlRequest,
                     const sendEscape = async () => {
                         const fresh = await readNativeTerminalSnapshot(request, options)
                         if (!fresh.target || fresh.target.binding !== target.binding || fresh.state.modelMenu
-                            || nativeComposerText(fresh.target, fresh.raw) === null || options.canSend && !options.canSend()) throw new Error('Terminal changed')
+                            || nativeComposerText(fresh.target, fresh.raw) === null) throw new Error('Terminal changed')
                         const result = await run(['-S', target.socket, 'if-shell', '-F', '-t', target.pane, nativeTmuxCondition(fresh.target),
                             `send-keys -t ${target.pane} Escape ; display-message -p HAPI_CONTROL_SENT`, 'display-message -p HAPI_CONTROL_REJECTED'])
                         if (result.trim() !== 'HAPI_CONTROL_SENT') throw new Error('Interrupt not confirmed')

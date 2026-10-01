@@ -31,7 +31,6 @@ import { reconcileQueuedStateAfterConnect } from '@/lib/queued-state-reconciliat
 import { LoginPrompt } from '@/components/LoginPrompt'
 import { InstallPrompt } from '@/components/InstallPrompt'
 import { OfflineBanner } from '@/components/OfflineBanner'
-import { PhoneCurfewBanner, usePhoneCurfew } from '@/components/PhoneCurfewBanner'
 import { PwaUpdateBanner, PwaUpdateBannerWithStatusOffset } from '@/components/PwaUpdateBanner'
 import { SyncingBanner } from '@/components/SyncingBanner'
 import { ReconnectingBanner } from '@/components/ReconnectingBanner'
@@ -73,7 +72,6 @@ function AppInner() {
     const { token, api, isLoading: isAuthLoading, error: authError, needsBinding, bind } = useAuth(authSource, baseUrl)
     const [titleSuggestionAvailable, setTitleSuggestionAvailable] = useState(false)
     const [phoneGatewayEnabled, setPhoneGatewayEnabled] = useState(false)
-    const phoneCurfew = usePhoneCurfew(phoneGatewayEnabled)
     const goBack = useAppGoBack()
     const pathname = useLocation({ select: (location) => location.pathname })
     const matchRoute = useMatchRoute()
@@ -391,8 +389,8 @@ function AppInner() {
         () => getAppSseSubscription(selectedSessionId),
         [selectedSessionId]
     )
-    const sseEnabled = Boolean(api && token) && !phoneCurfew.restricted
-    const showReconnectingBanner = sseDisconnected && !isSyncing && !phoneCurfew.restricted
+    const sseEnabled = Boolean(api && token)
+    const showReconnectingBanner = sseDisconnected && !isSyncing
 
     const { subscriptionId: globalSubscriptionId } = useSSE({
         enabled: sseEnabled,
@@ -505,7 +503,6 @@ function AppInner() {
                 <VoiceErrorBanner />
                 <RunnerVersionSkewBanner />
                 <div className="h-full min-h-0 flex flex-col">
-                    <PhoneCurfewBanner {...phoneCurfew} />
                     <OfflineBanner
                         cache={api.offlineCache}
                         isHubConnected={globalSubscriptionId !== null}
