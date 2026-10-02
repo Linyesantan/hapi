@@ -41,13 +41,12 @@ describe('resolveOpencodeSlashCommand', () => {
         });
     });
 
-    it('sets model, reasoning effort, and permission mode', () => {
-        expect(resolveOpencodeSlashCommand('/model openai/gpt-5', state)).toMatchObject({
-            updates: { model: 'openai/gpt-5' }
+    it('defers /model to the async picker and keeps the rest synchronous', () => {
+        expect(resolveOpencodeSlashCommand('/model openai/gpt-5', state)).toEqual({
+            kind: 'model',
+            query: 'openai/gpt-5'
         });
-        expect(resolveOpencodeSlashCommand('/model default', state)).toMatchObject({
-            updates: { model: null }
-        });
+        expect(resolveOpencodeSlashCommand('/model', state)).toEqual({ kind: 'model', query: '' });
         expect(resolveOpencodeSlashCommand('/reasoning low', state)).toMatchObject({
             updates: { modelReasoningEffort: 'low' }
         });
@@ -70,10 +69,8 @@ describe('resolveOpencodeSlashCommand', () => {
     });
 
     it('shows current values when slash command has no argument', () => {
-        expect(resolveOpencodeSlashCommand('/model', state)).toEqual({
-            kind: 'handled',
-            message: 'OpenCode model: anthropic/claude-sonnet-4-5'
-        });
+        // `/model` is now async (see modelPicker.ts) so it only carries the query.
+        expect(resolveOpencodeSlashCommand('/model', state)).toEqual({ kind: 'model', query: '' });
         expect(resolveOpencodeSlashCommand('/reasoning', state)).toEqual({
             kind: 'handled',
             message: 'OpenCode reasoning effort: high'

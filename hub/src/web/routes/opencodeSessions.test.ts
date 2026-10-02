@@ -64,6 +64,32 @@ describe('OpenCode read-only history', () => {
         expect(sync()).not.toBe(sync(transcript, { ...machine, id: 'other-pc' }))
     })
 
+    it('mirrors the transcript model so the session header can name it', () => {
+        const id = sync()
+        expect(store.sessions.getSession(id)?.model).toBeNull()
+
+        const withModel = { ...transcript, model: 'opencode/space-bunny-free' }
+        expect(sync(withModel)).toBe(id)
+        expect(store.sessions.getSession(id)?.model).toBe('opencode/space-bunny-free')
+        expect(engine.getSession(id)?.model).toBe('opencode/space-bunny-free')
+
+        // A later resync that can no longer see a model must clear it rather
+        // than leaving a stale label on the mirror.
+        expect(sync({ ...withModel, model: null })).toBe(id)
+        expect(store.sessions.getSession(id)?.model).toBeNull()
+    })
+
+    it('does not re-stamp the mirror on an unchanged model', () => {
+        const withModel = { ...transcript, model: 'opencode/space-bunny-free' }
+        const id = sync(withModel)
+        const setModel = spyOn(store.sessions, 'setSessionModel')
+        sync(withModel)
+        expect(setModel).not.toHaveBeenCalled()
+        expect(store.sessions.getSession(id)?.model).toBe('opencode/space-bunny-free')
+        sync({ ...withModel, model: 'kimi/kimi-k2-thinking' })
+        expect(setModel).toHaveBeenCalledWith(id, 'kimi/kimi-k2-thinking', 'default', { touchUpdatedAt: false })
+    })
+
     it('routes listing and selected history through the chosen machine and rejects writable imports', async () => {
         spyOn(engine, 'getOnlineMachinesByNamespace').mockReturnValue([machine])
         const list = spyOn(engine, 'listOpencodeSessionsForMachine').mockResolvedValue({ success: true, sessions: [transcript] })

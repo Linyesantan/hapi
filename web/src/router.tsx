@@ -40,6 +40,8 @@ import { useCursorChatStoreStatus } from '@/hooks/queries/useCursorChatStoreStat
 import { useSessions } from '@/hooks/queries/useSessions'
 import { useSlashCommands } from '@/hooks/queries/useSlashCommands'
 import { useSkills } from '@/hooks/queries/useSkills'
+import { parseModelQuery } from '@hapi/protocol/modelQuery'
+import { getModelQuerySuggestions as getModelQuerySuggestionsForSession } from '@/lib/modelQuerySuggestions'
 import { getSessionTitle } from '@/lib/sessionTitle'
 import { buildSessionReferenceText, matchSessionsForMention } from '@/lib/sessionReference'
 import type { Suggestion } from '@/hooks/useActiveSuggestions'
@@ -673,6 +675,19 @@ function SessionPage() {
     const {
         getSuggestions: getSkillSuggestions,
     } = useSkills(api, sessionId)
+
+    // `/model <keyword>` fetches the live catalog on demand, so it stays a
+    // callback rather than a query hook: typing should not poll a probe that
+    // spawns `opencode acp` on the machine.
+    const getModelSuggestions = useCallback(
+        (keyword: string) => getModelQuerySuggestionsForSession({
+            api,
+            sessionId,
+            flavor: agentType,
+            keyword
+        }),
+        [api, sessionId, agentType]
+    )
     // Mention pool is stricter than sidebar (#1506): titled sessions only; match via sessionMatchesQuery.
     const { sessions: allSessions } = useSessions(api)
     const { machines: mentionMachines } = useMachines(api, true)
@@ -738,6 +753,16 @@ function SessionPage() {
         if (query.startsWith('$')) {
             return await getSkillSuggestions(query)
         }
+        // `/model <keyword>` takes over the menu once an argument is typed:
+        // the slash-command matcher only scores command names, so `/model glm`
+        // would otherwise show nothing at all.
+        const modelQuery = parseModelQuery(query)
+        if (modelQuery) {
+            const modelHits = await getModelSuggestions(modelQuery.keyword)
+            if (modelQuery.keyword) return modelHits
+            const slashHits = await getSlashSuggestions(query)
+            return [...modelHits, ...slashHits]
+        }
         return await getSlashSuggestions(query)
     }, [
         agentType,
@@ -747,6 +772,7 @@ function SessionPage() {
         resolveMentionMachineLabel,
         getSkillSuggestions,
         getSlashSuggestions,
+        getModelSuggestions,
     ])
 
     const historyReadOnly = isReadOnlyHistory(session?.metadata)

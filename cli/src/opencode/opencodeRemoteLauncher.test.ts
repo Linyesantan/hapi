@@ -1833,7 +1833,9 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(failureMessages[0]?.message).toContain('ollama/b');
         expect(setModel).toHaveBeenCalledWith('ollama/a');
         expect(session.model).toBe('ollama/a');
-        expect(pushKeepAlive).toHaveBeenCalledTimes(1);
+        // Two keepalives: the startup adopt that reports the discovered model,
+        // then the rollback after the failed switch.
+        expect(pushKeepAlive).toHaveBeenCalledTimes(2);
         expect(rollbacks).toEqual(['ollama/a']);
         expect(harness.promptCount).toBe(2);
     });
@@ -1856,6 +1858,49 @@ describe('opencodeRemoteLauncher inline model switch', () => {
         expect(harness.setConfigOptionArgs).toEqual([]);
         expect(setModelReasoningEffort).toHaveBeenCalledWith('low');
         expect(harness.promptCount).toBe(1);
+    });
+
+    it('adopts the backend-reported model so the hub can name the working model', async () => {
+        harness.sessionModelsMetadata = {
+            currentModelId: 'opencode/space-bunny-free',
+            availableModels: []
+        };
+        const { session, setModel, pushKeepAlive } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+
+        await opencodeRemoteLauncher(session as never);
+
+        expect(setModel).toHaveBeenCalledWith('opencode/space-bunny-free');
+        expect(session.model).toBe('opencode/space-bunny-free');
+        expect(pushKeepAlive).toHaveBeenCalled();
+    });
+
+    it('never overwrites an explicit model choice with the backend default', async () => {
+        harness.sessionModelsMetadata = {
+            currentModelId: 'opencode/space-bunny-free',
+            availableModels: []
+        };
+        const { session, setModel } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+        session.model = 'kimi/kimi-k2-thinking';
+
+        await opencodeRemoteLauncher(session as never);
+
+        expect(setModel).not.toHaveBeenCalled();
+        expect(session.model).toBe('kimi/kimi-k2-thinking');
+    });
+
+    it('leaves the model blank when the backend reports none', async () => {
+        const { session, setModel } = createSessionStub([
+            { message: 'first', mode: createMode() }
+        ]);
+
+        await opencodeRemoteLauncher(session as never);
+
+        expect(setModel).not.toHaveBeenCalled();
+        expect(session.model).toBeNull();
     });
 
     it('syncs hub effort state after coercing an unsupported request to a different supported value', async () => {

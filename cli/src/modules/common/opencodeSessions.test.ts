@@ -48,6 +48,35 @@ describe('OpenCode native history reader', () => {
         expect(readFileSync(dbFile)).toEqual(before)
     })
 
+    it('reports the newest assistant turn model as provider/modelId', () => {
+        const summaries = JSON.parse(run(`import { listLocalOpencodeSessionSummaries } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(await listLocalOpencodeSessionSummaries()));`))
+        // The fixture's only assistant message carries no model fields yet.
+        expect(summaries[0].model).toBeNull()
+
+        run(`
+            import { Database } from 'bun:sqlite';
+            import { join } from 'node:path';
+            const db = new Database(join(process.env.XDG_DATA_HOME, 'opencode', 'opencode.db'));
+            db.query('UPDATE message SET data = ? WHERE id = ?').run(JSON.stringify({ role: 'assistant', providerID: 'opencode', modelID: 'space-bunny-free' }), 'm2');
+            db.query('INSERT INTO message VALUES (?, ?, ?, ?)').run('m3', 'native-1', 2500, JSON.stringify({ role: 'assistant', providerID: 'kimi', modelID: 'kimi-k2-thinking' }));
+            db.close();
+        `)
+        const updated = JSON.parse(run(`import { listLocalOpencodeSessionSummaries } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(await listLocalOpencodeSessionSummaries()));`))
+        expect(updated[0].model).toBe('kimi/kimi-k2-thinking')
+    })
+
+    it('falls back to a bare model id when the row records no provider', () => {
+        run(`
+            import { Database } from 'bun:sqlite';
+            import { join } from 'node:path';
+            const db = new Database(join(process.env.XDG_DATA_HOME, 'opencode', 'opencode.db'));
+            db.query('UPDATE message SET data = ? WHERE id = ?').run(JSON.stringify({ role: 'assistant', modelID: 'gpt-5' }), 'm2');
+            db.close();
+        `)
+        const summaries = JSON.parse(run(`import { listLocalOpencodeSessionSummaries } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(await listLocalOpencodeSessionSummaries()));`))
+        expect(summaries[0].model).toBe('gpt-5')
+    })
+
     it('honors native undo boundaries and selected IDs instead of reopening the agent', () => {
         run(`import { Database } from 'bun:sqlite'; import { join } from 'node:path'; const db = new Database(join(process.env.XDG_DATA_HOME, 'opencode', 'opencode.db')); db.query('UPDATE session SET revert = ? WHERE id = ?').run(JSON.stringify({ messageID: 'm2' }), 'native-1'); db.close();`)
         const sessions = JSON.parse(run(`import { listLocalOpencodeSessionsWithMessagesByIds } from ${JSON.stringify(modulePath)}; console.log(JSON.stringify(await listLocalOpencodeSessionsWithMessagesByIds(new Set(['native-1', "bad'id"]))));`))

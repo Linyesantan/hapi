@@ -28,7 +28,6 @@ import { formatSessionHeaderTimestamp } from '@/lib/sessionHeaderTimestamp'
 import { selectMobileSessionHeaderSecondary } from '@/lib/sessionHeaderMobileMetadata'
 import { useMinuteTick } from '@/hooks/useMinuteTick'
 import { markSessionUnread } from '@/lib/sessionLastSeen'
-import { isReadOnlyHistory } from '@hapi/protocol/history'
 
 /** Same preference order as session-list chips: display label → host → short id. */
 export function resolveSessionHeaderMachineLabel(
@@ -330,6 +329,16 @@ export function SessionHeader(props: {
             }
             if (!imported) throw new Error(result.error || t('piImport.failed.body'))
 
+            // A read-only mirror cannot be promoted in place: the hub keys a
+            // writable import separately (`pi-import:` vs `pi-history:`), so the
+            // import lands on a new session id. Follow it, otherwise the click
+            // looks like a no-op.
+            if (imported.hapiSessionId && imported.hapiSessionId !== session.id) {
+                await queryClient.invalidateQueries({ queryKey: queryKeys.sessions })
+                window.location.assign(`/sessions/${imported.hapiSessionId}`)
+                return
+            }
+
             await Promise.all([
                 queryClient.invalidateQueries({ queryKey: queryKeys.session(session.id) }),
                 queryClient.invalidateQueries({ queryKey: queryKeys.messages(session.id) }),
@@ -525,7 +534,10 @@ export function SessionHeader(props: {
                 onSetPinMode={api ? (mode) => void handleSetPinMode(mode) : undefined}
                 onExport={() => setExportOpen(true)}
                 onSyncCodex={api && codexSessionId && !session.active ? handleSyncCodex : undefined}
-                onSyncPi={api && piSessionId && !session.active && !isReadOnlyHistory(session.metadata) ? handleSyncPi : undefined}
+                // A read-only mirror is exactly the case this action exists for:
+                // hiding the button on `historyReadOnly` meant a session imported
+                // from the terminal could never be promoted to a controllable one.
+                onSyncPi={api && piSessionId && !session.active ? handleSyncPi : undefined}
                 onArchive={() => setArchiveOpen(true)}
                 onReopen={props.canReopen === false ? undefined : handleReopen}
                 reopenDisabledReason={props.reopenDisabledReason}

@@ -248,6 +248,7 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         const initialMetadata = backend.getSessionModelsMetadata?.(acpSessionId);
         this.currentBackendModel = initialMetadata?.currentModelId ?? null;
         this.defaultBackendModel = this.currentBackendModel;
+        this.adoptDiscoveredModel(initialMetadata?.currentModelId ?? null);
         const thoughtLevelOption = backend.getThoughtLevelConfigOption?.(acpSessionId);
         this.currentBackendEffort = thoughtLevelOption?.currentValue ?? null;
         this.defaultBackendEffort = this.currentBackendEffort;
@@ -850,6 +851,19 @@ class OpencodeRemoteLauncher extends RemoteLauncherBase {
         } catch (error) {
             logger.debug('[opencode-remote] cancelPrompt after stderr failed', error);
         }
+    }
+
+    /**
+     * Record the model the backend reports for a freshly created/loaded ACP
+     * session, so the hub (and therefore the web header) can name the model that
+     * is actually working instead of showing nothing. Only fills a blank model:
+     * an explicit `--model` or `/model` choice always wins, and this never
+     * touches `currentBackendModel`, which already matches the backend here.
+     */
+    private adoptDiscoveredModel(modelId: string | null): void {
+        if (!modelId || this.session.getModel()) return;
+        this.session.setModel(modelId);
+        this.session.pushKeepAlive();
     }
 
     private rollbackReasoningEffort(batch: { mode: OpencodeMode }, effort: string | null): void {

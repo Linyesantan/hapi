@@ -36,6 +36,25 @@ async function readDatabase<T>(fallback: T, read: (db: Database, path: string) =
     }
 }
 
+/**
+ * Newest assistant turn's `providerID`/`modelID`. OpenCode records both on the
+ * message row, so the read-only mirror can name the model that produced a
+ * transcript instead of showing a blank header.
+ */
+function lastAssistantModel(db: Database, sessionId: string): string | null {
+    const row = db.query<DataRow, [string]>(`
+        SELECT id, time_created, data FROM message
+        WHERE session_id = ? AND json_extract(data, '$.role') = 'assistant'
+        ORDER BY time_created DESC, id DESC LIMIT 1
+    `).get(sessionId)
+    if (!row) return null
+    const data = parse(row.data)
+    const modelId = typeof data.modelID === 'string' ? data.modelID : null
+    if (!modelId) return null
+    const providerId = typeof data.providerID === 'string' && data.providerID ? data.providerID : null
+    return providerId ? `${providerId}/${modelId}` : modelId
+}
+
 function summary(db: Database, path: string, row: SessionRow): OpencodeLocalSessionSummary {
     const last = db.query<DataRow, [string]>(`
         SELECT p.id, p.time_created, p.data FROM message m JOIN part p ON p.message_id = m.id
@@ -51,7 +70,8 @@ function summary(db: Database, path: string, row: SessionRow): OpencodeLocalSess
         lastUserMessage: typeof text === 'string' ? text.slice(0, 300) : null,
         cwd: row.directory,
         file: path,
-        modifiedAt: row.time_updated
+        modifiedAt: row.time_updated,
+        model: lastAssistantModel(db, row.id)
     }
 }
 

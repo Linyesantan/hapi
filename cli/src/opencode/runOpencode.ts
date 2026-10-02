@@ -16,6 +16,8 @@ import { formatMessageWithAttachments } from '@/utils/attachmentFormatter';
 import { getInvokedCwd } from '@/utils/invokedCwd';
 import { listSlashCommands } from '@/modules/common/slashCommands';
 import { resolveOpencodeSlashCommand } from './utils/slashCommands';
+import { listOpencodeModelsForCwd } from '@/modules/common/opencodeModels';
+import { resolveModelQuery, type ModelPickerResolution } from './utils/modelPicker';
 import { isRetryableConnectionError } from '@/utils/errorUtils';
 import { withRetry } from '@/utils/time';
 
@@ -285,6 +287,56 @@ export async function runOpencode(opts: {
                     // A clear is isolated but retains its FIFO position:
                     // older prompts and native /compact work finish first.
                     messageQueue.pushIsolated('', { ...buildMode(), operation: 'clear' }, localId);
+                    return;
+                }
+
+                if (slash.kind === 'model') {
+                    // The catalog comes from a short-lived `opencode acp`
+                    // probe (cached per cwd), so this branch is async. A
+                    // failed probe still answers `/model default` and reports
+                    // the failure instead of leaving the user with silence.
+                    const query = slash.query;
+                    const probed = await listOpencodeModelsForCwd(workingDirectory).catch(() => null);
+                    // The probe can take seconds; a cancelled `/model` must not
+                    // answer afterwards, same as the listSlashCommands race above.
+                    if (wasCancelled()) return;
+                    let resolution: ModelPickerResolution;
+                    if (!probed?.success) {
+                        resolution = query.trim() && ['default', 'auto'].includes(query.trim().toLowerCase())
+                            ? { kind: 'set', model: null, message: 'OpenCode model set to default' }
+                            : {
+                                kind: 'list',
+                                message: [
+                                    '**OpenCode model**',
+                                    '',
+                                    `current: \`${sessionModel ?? 'default'}\``,
+                                    '',
+                                    probed?.error
+                                        ? `Could not load the model catalog: ${probed.error}`
+                                        : 'Could not load the model catalog.'
+                                ].join('\n')
+                            };
+                    } else {
+                        resolution = resolveModelQuery({
+                            query,
+                            models: probed.availableModels ?? [],
+                            currentModelId: probed.currentModelId ?? null,
+                            sessionModel
+                        });
+                    }
+                    if (resolution.kind === 'set') {
+                        sessionModel = resolution.model;
+                        syncSessionMode();
+                    }
+                    if (localId) {
+                        session.emitMessagesConsumed([localId], { clearQueuedThinkingGrace: true });
+                    }
+                    session.sendAgentMessage({
+                        type: 'message',
+                        message: resolution.message,
+                        id: randomUUID()
+                    });
+                    sessionWrapperRef.current?.onThinkingChange(false);
                     return;
                 }
 

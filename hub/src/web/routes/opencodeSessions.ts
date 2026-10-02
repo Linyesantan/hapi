@@ -62,6 +62,14 @@ export function syncOpencodeHistory(options: {
     }
     const updated = store.sessions.updateSessionMetadata(session.id, { ...prior, ...metadata }, session.metadataVersion, namespace, { touchUpdatedAt: false })
     if (updated.result !== 'success') throw new Error('Failed to update OpenCode history metadata')
+    // The transcript itself never reports a model through the agent runtime, so
+    // persist the one recorded on its newest assistant turn. Otherwise the
+    // session header renders no model at all for read-only mirrors.
+    const mirrored = store.sessions.getSession(session.id)
+    if (mirrored && mirrored.model !== (transcript.model ?? null)) {
+        store.sessions.setSessionModel(session.id, transcript.model ?? null, namespace, { touchUpdatedAt: false })
+        mirrored.model = transcript.model ?? null
+    }
     engine.recordSessionActivity(session.id, transcript.modifiedAt)
     engine.handleRealtimeEvent({ type: 'session-updated', sessionId: session.id })
     for (const message of store.messages.getAllMessages(session.id).slice(prefix)) {

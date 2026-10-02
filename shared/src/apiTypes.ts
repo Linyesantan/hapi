@@ -438,7 +438,9 @@ export const OpencodeLocalSessionSummarySchema = z.object({
     cwd: z.string().nullable().optional(),
     file: z.string().min(1),
     modifiedAt: z.number(),
-    sourceState: HistorySourceStateSchema.optional()
+    sourceState: HistorySourceStateSchema.optional(),
+    /** `provider/modelId` of the newest assistant turn, for the read-only mirror header. */
+    model: z.string().nullable().optional()
 })
 
 export const OpencodeLocalSessionWithMessagesSchema = OpencodeLocalSessionSummarySchema.extend({

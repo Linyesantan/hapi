@@ -28,6 +28,9 @@ export type OpencodeSlashResolution =
     // /clear exits the current runner-backed HAPI process after its FIFO
     // predecessors finish, then asks the hub to spawn a fresh OpenCode one.
     | { kind: 'clear' }
+    // /model needs the probed model catalog (opencodeModels.ts), which is only
+    // available asynchronously, so the launcher resolves the query itself.
+    | { kind: 'model'; query: string }
     | {
         kind: 'handled';
         message: string;
@@ -120,15 +123,7 @@ export function resolveOpencodeSlashCommand(
     }
 
     if (command === 'model') {
-        if (!rest) {
-            return { kind: 'handled', message: `OpenCode model: ${state.model ?? 'default'}` };
-        }
-        const model = rest === 'auto' || rest === 'default' ? null : rest;
-        return {
-            kind: 'handled',
-            message: `OpenCode model set to ${model ?? 'default'}`,
-            updates: { model }
-        };
+        return { kind: 'model', query: rest };
     }
 
     if (command === 'reasoning' || command === 'effort') {
@@ -205,6 +200,7 @@ export function resolveOpencodeSlashCommand(
                 '- `/init [extra]` — generate or refresh AGENTS.md for this project',
                 '- `/compact` — compact (summarize) the OpenCode session context (remote sessions only)',
                 '- `/clear` — archive this HAPI session and open a fresh OpenCode session',
+                '- `/model [keyword|number]` — list models, filter by keyword, or pick one by number',
                 '',
                 'Model, reasoning effort, and permission mode have dedicated buttons in the composer. ' +
                 'You can still type `/model`, `/reasoning`, or `/permissions` if you prefer.',
